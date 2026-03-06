@@ -1,0 +1,40 @@
+[package]
+name = "color_vlc"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "decoder"
+path = "src/decoder_main.rs"
+
+# 第二个二进制文件
+[[bin]]
+name = "encoder"
+path = "src/encoder_main.rs"
+
+[dependencies]
+affinity = { version = "0.1.2", optional = true }
+ndarray = "0.16.1"
+video-rs = { version = "0.10.5", features = ["ndarray"] }
+ffmpeg-next = "7.1"
+opencv = { version = "0.98.1", features = ["clang-runtime"] }
+image = "0.25.1"
+const_format = "0.2.35"
+anyhow = "1.0.102"
+
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+affinity = "0.1.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 0
+strip = "symbols"
+incremental = false
+
+
+[profile.release.package."*"]
+opt-level = 3
