@@ -19,7 +19,6 @@ fn main() {
     // 默认使用 Version 30, EC Level L, box_size 4, border 1
     let encoder = ColorEncoder::new(30, QRErrorCorrectLevel::L, 4, 1);
 
-    encoder.encode(input_bin, output_mkv, max_ms).unwrap();
     if let Err(e) = encoder.encode(input_bin, output_mkv, max_ms) {
         eprintln!("Error during encoding: {}", e);
         process::exit(1);
