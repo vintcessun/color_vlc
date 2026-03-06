@@ -161,7 +161,7 @@ impl ColorEncoder {
         }
 
         let total_frames = pairs.len();
-        let mut fps = 30.0;
+        let mut fps = 40.0;
         if (total_frames as f64 / fps) * 1000.0 > max_ms as f64 {
             fps = (total_frames as f64 / (max_ms as f64 / 1000.0)).ceil();
         }
