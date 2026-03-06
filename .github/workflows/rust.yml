@@ -31,11 +31,6 @@ jobs:
             - name: Checkout source
               uses: actions/checkout@v4
 
-            - name: Prepare LLM tool config
-              run: |
-                  cp src/api/llm/tool/config-template.rs src/api/llm/tool/config.rs
-                  cp src/api/llm/chat/config-template.rs src/api/llm/chat/config.rs
-
             - name: Install Dependencies
               run: |
                   sudo apt-get update
@@ -344,11 +339,6 @@ jobs:
                   "C:\ffmpeg\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
                   "FFMPEG_BIN_PATH=C:\ffmpeg\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-            - name: Prepare LLM tool config
-              run: |
-                  Copy-Item src/api/llm/tool/config-template.rs src/api/llm/tool/config.rs
-                  Copy-Item src/api/llm/chat/config-template.rs src/api/llm/chat/config.rs
-
             - name: Set up Rust
               uses: dtolnay/rust-toolchain@stable
               with:
@@ -475,11 +465,6 @@ jobs:
         steps:
             - name: Checkout source
               uses: actions/checkout@v4
-
-            - name: Prepare LLM tool config
-              run: |
-                  cp src/api/llm/tool/config-template.rs src/api/llm/tool/config.rs
-                  cp src/api/llm/chat/config-template.rs src/api/llm/chat/config.rs
 
             - name: Set up Rust
               uses: dtolnay/rust-toolchain@stable
