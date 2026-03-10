@@ -503,9 +503,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_qrcode_v30_l() {
+    fn test_qrcode_v40_l() {
         let mut qr = QRCode::new();
-        qr.type_number = 30;
+        qr.type_number = 40;
         qr.options.correct_level = QRErrorCorrectLevel::L;
 
         // 构造一些随机或有特征的测试数据
@@ -517,8 +517,8 @@ mod tests {
         qr.make_code(&data_a, &data_b);
 
         let count = qr.get_module_count();
-        // Version 30: 4 * 30 + 17 = 137
-        assert_eq!(count, 137);
+        // Version 40: 4 * 40 + 17 = 177
+        assert_eq!(count, 177);
 
         // 验证定位块颜色
         // 左上角 (0,0) 到 (6,6) 应该是红色相关
@@ -560,10 +560,10 @@ mod tests {
                 }
             }
         }
-        img.save("test_qrcode_v30.png").unwrap();
+        img.save("test_qrcode_v40.png").unwrap();
 
         println!(
-            "Successfully generated Version 30 Color QRCode and saved to test_qrcode_v30.png!"
+            "Successfully generated Version 40 Color QRCode and saved to test_qrcode_v40.png!"
         );
     }
 }

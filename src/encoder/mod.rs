@@ -161,7 +161,7 @@ impl ColorEncoder {
         }
 
         let total_frames = pairs.len();
-        let mut fps = 40.0;
+        let mut fps = 30.0;
         if (total_frames as f64 / fps) * 1000.0 > max_ms as f64 {
             fps = (total_frames as f64 / (max_ms as f64 / 1000.0)).ceil();
         }
@@ -208,6 +208,8 @@ impl ColorEncoder {
 
         let mut encoder = video_ctx.open()?;
         stream.set_parameters(&encoder);
+        stream.set_time_base(ffmpeg::Rational::new(1, fps as i32));
+        stream.set_avg_frame_rate(ffmpeg::Rational::new(fps as i32, 1));
 
         octx.write_header()?;
 
@@ -288,6 +290,10 @@ fn receive_and_write_packets(
     let mut packet = ffmpeg::codec::packet::Packet::empty();
     while encoder.receive_packet(&mut packet).is_ok() {
         packet.set_stream(stream_index);
+        packet.rescale_ts(
+            encoder.time_base(),
+            octx.stream(stream_index).unwrap().time_base(),
+        );
         packet.write_interleaved(octx)?;
     }
     Ok(())
