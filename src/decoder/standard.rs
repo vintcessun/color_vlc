@@ -498,6 +498,51 @@ impl QRDecoderStandardizer {
             Ok(None)
         }
     }
+
+    /// 将校正后的二维码 (warped) 可视化，将每个模块分割并用黑线包围输出为更大的图
+    pub fn visualize_warped_grid(
+        warped: &core::Mat,
+        version: i32,
+        box_size: i32,
+        gap: i32,
+    ) -> Result<core::Mat> {
+        let n = version * 4 + 17;
+        // 可视化图中每个模块占用的空间：box_size + gap
+        let grid_size = box_size + gap;
+        let total_size = n * grid_size + gap;
+
+        // 创建全黑背景图
+        let mut visual = core::Mat::new_size_with_default(
+            Size::new(total_size, total_size),
+            core::CV_8UC3,
+            Scalar::new(0.0, 0.0, 0.0, 0.0), // 黑色背景，形成黑线
+        )?;
+
+        for r in 0..n {
+            for c in 0..n {
+                // 原图中该模块的区域
+                let src_rect = Rect::new(c * box_size, r * box_size, box_size, box_size);
+
+                // 边界检查，防止 warped 图尺寸不完全匹配（如经过 GAN 锐化后可能有 1-2 像素偏差）
+                let safe_src_rect = Rect::new(0, 0, warped.cols(), warped.rows()) & src_rect;
+                if safe_src_rect.width <= 0 || safe_src_rect.height <= 0 {
+                    continue;
+                }
+
+                let src_roi = core::Mat::roi(warped, safe_src_rect)?;
+
+                // 目标图中该模块的位置（留出 gap 像素的黑线）
+                let dst_x = c * grid_size + gap;
+                let dst_y = r * grid_size + gap;
+                let dst_rect = Rect::new(dst_x, dst_y, safe_src_rect.width, safe_src_rect.height);
+
+                let mut dst_roi = core::Mat::roi_mut(&mut visual, dst_rect)?;
+                src_roi.copy_to(&mut dst_roi)?;
+            }
+        }
+
+        Ok(visual)
+    }
 }
 
 #[cfg(test)]
@@ -520,6 +565,11 @@ mod tests {
         if let Some(warped) = decoder.get_warped_frame(&frame, version, box_size)? {
             imgcodecs::imwrite("warped.png", &warped, &core::Vector::new())?;
             println!("Warped frame saved to warped.png");
+
+            let grid_warped =
+                QRDecoderStandardizer::visualize_warped_grid(&warped, version, box_size, 1)?;
+            imgcodecs::imwrite("grid_warped.png", &grid_warped, &core::Vector::new())?;
+            println!("Grid visualized warped frame saved to grid_warped.png");
         } else {
             panic!("Could not find finder patterns in test.png");
         }

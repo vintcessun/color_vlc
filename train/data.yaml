@@ -1,0 +1,11 @@
+
+path: C:\Users\vintces\Desktop\rust\color_vlc\train\dataset
+train: images
+val: images
+
+names:
+  0: color_qr
+
+# Keypoints: x, y, visible (v=0: not labeled, v=1: labeled but not visible, v=2: labeled and visible)
+# 53 keypoints: 3 Finder Pattern centers + 46 Alignment Pattern centers + 4 corners
+kpt_shape: [53, 3]

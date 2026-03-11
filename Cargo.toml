@@ -12,9 +12,17 @@ path = "src/decoder_main.rs"
 name = "encoder"
 path = "src/encoder_main.rs"
 
+[[bin]]
+name = "yolo_test"
+path = "src/yolo_test.rs"
+
+[[bin]]
+name = "gen_base"
+path = "src/gen_base.rs"
+
 [dependencies]
 affinity = { version = "0.1.2", optional = true }
-ndarray = "0.16.1"
+ndarray = "0.17.2"
 video-rs = { version = "0.10.5", features = ["ndarray"] }
 ffmpeg-next = "7.1"
 opencv = { version = "0.98.1", features = ["clang-runtime", "dnn_superres"] }
@@ -23,6 +31,7 @@ const_format = "0.2.35"
 anyhow = "1.0.102"
 reed-solomon = "0.2.1"
 rand = "0.10.0"
+ort = "2.0.0-rc.12"
 
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
