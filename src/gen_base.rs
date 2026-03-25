@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     for i in 0..count {
         let mut qr = QRCode::new();
         qr.type_number = 40;
-        qr.options.correct_level = QRErrorCorrectLevel::L;
+        qr.options.correct_level = QRErrorCorrectLevel::M;
 
         // Version 40 L 的容量是 2953 字节。每帧包含 payload_a (A) 和 payload_b (B)。
         // 参考 src/encoder/mod.rs: get_dynamic_chunk_size() -> max_bytes - 15

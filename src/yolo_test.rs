@@ -1,11 +1,57 @@
 use anyhow::Result;
-use color_vlc::decoder::qrcode::decode_color_blocks_v40m;
+use color_vlc::decoder::qrcode::{decode_color_blocks, decode_color_blocks_v40m};
 use color_vlc::decoder::yolo::YoloDetector;
+use color_vlc::shared::QRCodeBlock;
 use opencv::{
     core::{self, MatTrait, MatTraitConst},
     imgcodecs, imgproc,
 };
 use std::path::Path;
+
+fn sample_blocks_from_ideal_image(
+    img: &core::Mat,
+    version: i32,
+) -> Result<Option<Vec<Vec<QRCodeBlock>>>> {
+    let m = (version - 1) * 4 + 21;
+    let n = m + 2;
+
+    if img.cols() % n != 0 || img.rows() % n != 0 {
+        return Ok(None);
+    }
+
+    let box_w = img.cols() / n;
+    let box_h = img.rows() / n;
+    if box_w <= 0 || box_h <= 0 || box_w != box_h {
+        return Ok(None);
+    }
+
+    let mut blocks = vec![vec![QRCodeBlock::White; m as usize]; m as usize];
+
+    for y in 0..m {
+        for x in 0..m {
+            // border=1: module (x,y) maps to cell (x+1,y+1)
+            let cx = (x + 1) * box_w + box_w / 2;
+            let cy = (y + 1) * box_h + box_h / 2;
+            let p = img.at_2d::<core::Vec3b>(cy, cx)?;
+            let b = p[0] as i32;
+            let g = p[1] as i32;
+            let r = p[2] as i32;
+
+            let block = if r >= 200 && g <= 80 && b <= 80 {
+                QRCodeBlock::Red
+            } else if g >= 200 && r <= 80 && b <= 80 {
+                QRCodeBlock::Green
+            } else if b >= 200 && r <= 80 && g <= 80 {
+                QRCodeBlock::Blue
+            } else {
+                QRCodeBlock::White
+            };
+            blocks[y as usize][x as usize] = block;
+        }
+    }
+
+    Ok(Some(blocks))
+}
 
 fn run_test(detector: &mut YoloDetector, input_path: &str, output_prefix: &str) -> Result<()> {
     if !Path::new(input_path).exists() {
@@ -148,6 +194,17 @@ fn run_test(detector: &mut YoloDetector, input_path: &str, output_prefix: &str) 
         imgcodecs::imwrite("debug_sample_b.bmp", &img_b, &core::Vector::new())?;
         println!("  Saved debug sampling maps to debug_sample_a.bmp and debug_sample_b.bmp");
 
+        match decode_color_blocks(&blocks) {
+            Ok((data_a, data_b)) => {
+                println!("  Successfully decoded color blocks with auto metadata!");
+                println!("  Stream A (hex): {:02X?}", data_a);
+                println!("  Stream B (hex): {:02X?}", data_b);
+            }
+            Err(e) => {
+                println!("  Auto metadata decode failed: {}", e);
+            }
+        }
+
         match decode_color_blocks_v40m(&blocks) {
             Ok((data_a, data_b)) => {
                 println!("  Successfully decoded color blocks with fixed Version 40 and ECC M!");
@@ -165,6 +222,66 @@ fn run_test(detector: &mut YoloDetector, input_path: &str, output_prefix: &str) 
     Ok(())
 }
 
+fn run_direct_grid_test(detector: &mut YoloDetector, input_path: &str) -> Result<()> {
+    if !Path::new(input_path).exists() {
+        println!("Skipping direct-grid test {}: file not found", input_path);
+        return Ok(());
+    }
+
+    println!("Direct-grid test on {}...", input_path);
+    let rectified = imgcodecs::imread(input_path, imgcodecs::IMREAD_COLOR)?;
+
+    if let Some(ideal_blocks) = sample_blocks_from_ideal_image(&rectified, 40)? {
+        match decode_color_blocks(&ideal_blocks) {
+            Ok((data_a, data_b)) => {
+                println!("  Ideal-sampler decode success (auto metadata)");
+                println!("  Stream A bytes: {}", data_a.len());
+                println!("  Stream B bytes: {}", data_b.len());
+            }
+            Err(e) => {
+                println!("  Ideal-sampler auto decode failed: {}", e);
+            }
+        }
+
+        match decode_color_blocks_v40m(&ideal_blocks) {
+            Ok((data_a, data_b)) => {
+                println!("  Ideal-sampler decode success (v40m)");
+                println!("  Stream A bytes: {}", data_a.len());
+                println!("  Stream B bytes: {}", data_b.len());
+            }
+            Err(e) => {
+                println!("  Ideal-sampler v40m decode failed: {}", e);
+            }
+        }
+    }
+
+    let blocks = detector.sample_grid(&rectified, 40)?;
+
+    match decode_color_blocks(&blocks) {
+        Ok((data_a, data_b)) => {
+            println!("  Direct-grid decode success (auto metadata)");
+            println!("  Stream A bytes: {}", data_a.len());
+            println!("  Stream B bytes: {}", data_b.len());
+        }
+        Err(e) => {
+            println!("  Direct-grid auto decode failed: {}", e);
+        }
+    }
+
+    match decode_color_blocks_v40m(&blocks) {
+        Ok((data_a, data_b)) => {
+            println!("  Direct-grid decode success (v40m)");
+            println!("  Stream A bytes: {}", data_a.len());
+            println!("  Stream B bytes: {}", data_b.len());
+        }
+        Err(e) => {
+            println!("  Direct-grid v40m decode failed: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let s1_path = "train/stage1.onnx";
     let s2_path = "train/stage2.onnx";
@@ -176,7 +293,10 @@ fn main() -> Result<()> {
 
     let mut detector = YoloDetector::new(s1_path, s2_path)?;
 
-    run_test(&mut detector, "test.jpg", "test")?;
+    run_direct_grid_test(&mut detector, "test_qr40_color.png")?;
+    //run_direct_grid_test(&mut detector, "train/base_images/base_0002.png")?;
+    //run_direct_grid_test(&mut detector, "train/base_images/base_0009.png")?;
+    // run_test(&mut detector, "test.jpg", "test")?;
 
     Ok(())
 }

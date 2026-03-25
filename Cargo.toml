@@ -24,6 +24,10 @@ path = "src/gen_base.rs"
 name = "qrcode_test"
 path = "src/qrcode_test.rs"
 
+[[bin]]
+name = "gen_ideal"
+path = "src/gen_ideal.rs"
+
 [dependencies]
 affinity = { version = "0.1.2", optional = true }
 ndarray = "0.17.2"

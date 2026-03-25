@@ -9,6 +9,8 @@ use ort::{execution_providers::CUDAExecutionProvider, inputs, session::Session, 
 use palette::{FromColor, Lab, Srgb};
 use std::path::Path;
 
+type ColorRefsAndGains = (Lab, Lab, Lab, Lab, (f32, f32, f32));
+
 pub struct YoloDetection {
     pub bbox: Rect,
     pub confidence: f32,
@@ -141,7 +143,7 @@ impl TPSTransformer {
             &mut out,
             &map_x,
             &map_y,
-            imgproc::INTER_LINEAR,
+            imgproc::INTER_NEAREST,
             core::BORDER_CONSTANT,
             Scalar::default(),
         )?;
@@ -172,7 +174,8 @@ impl YoloDetector {
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
         let canon_pts = Self::compute_canon_pts_norm_raw()?;
-        let tps = TPSTransformer::new(&canon_pts, 800)?;
+        // 179个cell（Version40含边框）按约6px/cell重采样，减小颜色串扰
+        let tps = TPSTransformer::new(&canon_pts, 1074)?;
         Ok(Self {
             stage1,
             stage2,
@@ -354,7 +357,7 @@ impl YoloDetector {
             &mut rectified,
             &h_mat,
             Size::new(size, size),
-            imgproc::INTER_LINEAR,
+            imgproc::INTER_NEAREST,
             core::BORDER_CONSTANT,
             Scalar::default(),
         )?;
@@ -388,7 +391,7 @@ impl YoloDetector {
             &mut final_rectified,
             &affine_m,
             Size::new(size, size),
-            imgproc::INTER_LINEAR,
+            imgproc::INTER_NEAREST,
             core::BORDER_CONSTANT,
             Scalar::default(),
         )?;
@@ -1116,7 +1119,7 @@ impl YoloDetector {
         &self,
         rectified: &core::Mat,
         m: i32,
-    ) -> Result<(Lab, Lab, Lab, Lab)> {
+    ) -> Result<ColorRefsAndGains> {
         let h = rectified.rows() as f32;
         let w = rectified.cols() as f32;
         let cell_width = w / (m + 2) as f32;
@@ -1176,18 +1179,46 @@ impl YoloDetector {
             }
         }
 
-        // 采样白色参考：从非定位块的安全区域（比如(m-1, m-1)附近）
-        let white_region_sx = ((m as f32 + 0.5) * cell_width) as i32;
-        let white_region_ex = ((m as f32 + 1.5) * cell_width) as i32;
-        let white_region_sy = ((m as f32 + 0.5) * cell_height) as i32;
-        let white_region_ey = ((m as f32 + 1.5) * cell_height) as i32;
+        // 白色参考不能取图像角落（TPS remap 边界会被 BORDER_CONSTANT 污染）。
+        // 这里改为采样定位块外侧分隔带（separator）和时序图案中的白格。
+        let mut sample_white_module = |module_x: i32, module_y: i32| -> Result<()> {
+            let sx = ((module_x as f32 + 1.2) * cell_width) as i32;
+            let ex = ((module_x as f32 + 1.8) * cell_width) as i32;
+            let sy = ((module_y as f32 + 1.2) * cell_height) as i32;
+            let ey = ((module_y as f32 + 1.8) * cell_height) as i32;
 
-        for py in white_region_sy..white_region_ey {
-            for px in white_region_sx..white_region_ex {
-                if px >= 0 && px < rectified.cols() && py >= 0 && py < rectified.rows() {
-                    let p = rectified.at_2d::<core::Vec3b>(py, px)?;
-                    white_samples.push((p[0] as f32, p[1] as f32, p[2] as f32));
+            for py in sy..ey {
+                for px in sx..ex {
+                    if px >= 0 && px < rectified.cols() && py >= 0 && py < rectified.rows() {
+                        let p = rectified.at_2d::<core::Vec3b>(py, px)?;
+                        white_samples.push((p[0] as f32, p[1] as f32, p[2] as f32));
+                    }
                 }
+            }
+            Ok(())
+        };
+
+        // TL finder 的右侧和下侧分隔带
+        for i in 0..8 {
+            sample_white_module(7, i)?;
+            sample_white_module(i, 7)?;
+        }
+
+        // TR finder 的左侧分隔带
+        for i in 0..8 {
+            sample_white_module(m - 8, i)?;
+        }
+
+        // BL finder 的上侧分隔带
+        for i in 0..8 {
+            sample_white_module(i, m - 8)?;
+        }
+
+        // 时序图案中白格（行6和列6，奇数位置）
+        for i in 9..(m - 8) {
+            if i % 2 == 1 {
+                sample_white_module(i, 6)?;
+                sample_white_module(6, i)?;
             }
         }
 
@@ -1209,6 +1240,26 @@ impl YoloDetector {
         let (blue_b, blue_g, blue_r) = compute_avg(&blue_samples);
         let (white_b, white_g, white_r) = compute_avg(&white_samples);
 
+        // Use sampled white modules to estimate per-channel gains.
+        // This compensates color cast before final module classification.
+        let white_target = 230.0f32;
+        let gain_b = (white_target / white_b.max(1.0)).clamp(0.6, 1.8);
+        let gain_g = (white_target / white_g.max(1.0)).clamp(0.6, 1.8);
+        let gain_r = (white_target / white_r.max(1.0)).clamp(0.6, 1.8);
+
+        let apply_gain = |b: f32, g: f32, r: f32| -> (f32, f32, f32) {
+            (
+                (b * gain_b).clamp(0.0, 255.0),
+                (g * gain_g).clamp(0.0, 255.0),
+                (r * gain_r).clamp(0.0, 255.0),
+            )
+        };
+
+        let (red_b, red_g, red_r) = apply_gain(red_b, red_g, red_r);
+        let (green_b, green_g, green_r) = apply_gain(green_b, green_g, green_r);
+        let (blue_b, blue_g, blue_r) = apply_gain(blue_b, blue_g, blue_r);
+        let (white_b, white_g, white_r) = apply_gain(white_b, white_g, white_r);
+
         if cfg!(debug_assertions) {
             eprintln!("Color references (BGR):");
             eprintln!("  Red:   B={:.1}, G={:.1}, R={:.1}", red_b, red_g, red_r);
@@ -1221,6 +1272,10 @@ impl YoloDetector {
                 "  White: B={:.1}, G={:.1}, R={:.1}",
                 white_b, white_g, white_r
             );
+            eprintln!(
+                "  Channel gains: B={:.3}, G={:.3}, R={:.3}",
+                gain_b, gain_g, gain_r
+            );
         }
 
         Ok((
@@ -1228,6 +1283,7 @@ impl YoloDetector {
             self.bgr_to_lab(green_b, green_g, green_r),
             self.bgr_to_lab(blue_b, blue_g, blue_r),
             self.bgr_to_lab(white_b, white_g, white_r),
+            (gain_b, gain_g, gain_r),
         ))
     }
 
@@ -1256,10 +1312,50 @@ impl YoloDetector {
         let cell_height = rectified.rows() as f32 / n as f32;
 
         // 计算全局颜色参考：从定位块区域采样获得准确的RGB参考色
-        let (ref_red_lab, ref_green_lab, ref_blue_lab, ref_white_lab) =
+        let (ref_red_lab, ref_green_lab, ref_blue_lab, ref_white_lab, channel_gains) =
             self.compute_global_color_refs(rectified, m)?;
 
         let mut blocks = Vec::with_capacity(m as usize);
+        let mut idx_grid = vec![vec![3usize; m as usize]; m as usize];
+        let pos = crate::shared::qr_code_model::get_pattern_position(version);
+
+        let mut dbg_min_class = if cfg!(debug_assertions) {
+            Some(core::Mat::new_size_with_default(
+                Size::new(m, m),
+                core::CV_8UC3,
+                Scalar::all(0.0),
+            )?)
+        } else {
+            None
+        };
+        let mut dbg_margin = if cfg!(debug_assertions) {
+            Some(core::Mat::new_size_with_default(
+                Size::new(m, m),
+                core::CV_8UC1,
+                Scalar::all(0.0),
+            )?)
+        } else {
+            None
+        };
+
+        let block_to_idx = |b: crate::shared::QRCodeBlock| -> usize {
+            match b {
+                crate::shared::QRCodeBlock::Red => 0,
+                crate::shared::QRCodeBlock::Green => 1,
+                crate::shared::QRCodeBlock::Blue => 2,
+                crate::shared::QRCodeBlock::White => 3,
+            }
+        };
+
+        let idx_to_block = |idx: usize| -> crate::shared::QRCodeBlock {
+            match idx {
+                0 => crate::shared::QRCodeBlock::Red,
+                1 => crate::shared::QRCodeBlock::Green,
+                2 => crate::shared::QRCodeBlock::Blue,
+                _ => crate::shared::QRCodeBlock::White,
+            }
+        };
+
         for y in 0..m {
             let mut row = Vec::with_capacity(m as usize);
             for x in 0..m {
@@ -1272,10 +1368,11 @@ impl YoloDetector {
                 let mut sum_b = 0.0f32;
                 let mut count = 0;
 
-                let px_start = (mx * cell_width + cell_width * 0.2) as i32;
-                let px_end = (mx * cell_width + cell_width * 0.8) as i32;
-                let py_start = (my * cell_height + cell_height * 0.2) as i32;
-                let py_end = (my * cell_height + cell_height * 0.8) as i32;
+                // Tighten sampling window to avoid boundary bleed introduced by warp/remap.
+                let px_start = (mx * cell_width + cell_width * 0.3) as i32;
+                let px_end = (mx * cell_width + cell_width * 0.7) as i32;
+                let py_start = (my * cell_height + cell_height * 0.3) as i32;
+                let py_end = (my * cell_height + cell_height * 0.7) as i32;
 
                 for sy in py_start..py_end {
                     for sx in px_start..px_end {
@@ -1299,29 +1396,95 @@ impl YoloDetector {
                     (255.0, 255.0, 255.0)
                 };
 
+                let cur_color_bgr = (
+                    (cur_color_bgr.0 * channel_gains.0).clamp(0.0, 255.0),
+                    (cur_color_bgr.1 * channel_gains.1).clamp(0.0, 255.0),
+                    (cur_color_bgr.2 * channel_gains.2).clamp(0.0, 255.0),
+                );
+
                 let cur_lab = self.bgr_to_lab(cur_color_bgr.0, cur_color_bgr.1, cur_color_bgr.2);
                 let d_red = self.color_dist(cur_lab, ref_red_lab);
                 let d_green = self.color_dist(cur_lab, ref_green_lab);
                 let d_blue = self.color_dist(cur_lab, ref_blue_lab);
                 let d_white = self.color_dist(cur_lab, ref_white_lab);
+                let dists = [d_red, d_green, d_blue, d_white];
 
-                // 与编码端一致的bit语义：
-                // Red=(A=1,B=0), Green=(A=0,B=1), Blue=(A=1,B=1), White=(A=0,B=0)
-                let dark_a = d_red.min(d_blue) < d_green.min(d_white);
-                let dark_b = d_green.min(d_blue) < d_red.min(d_white);
+                let mut order = [0usize, 1usize, 2usize, 3usize];
+                order.sort_by(|a, b| {
+                    dists[*a]
+                        .partial_cmp(&dists[*b])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let best_idx_lab = order[0];
+                let second_idx_lab = order[1];
+                let margin = dists[second_idx_lab] - dists[best_idx_lab];
+
+                if let Some(class_img) = dbg_min_class.as_mut() {
+                    let color = match best_idx_lab {
+                        0 => core::Vec3b::from([0, 0, 255]),
+                        1 => core::Vec3b::from([0, 255, 0]),
+                        2 => core::Vec3b::from([255, 0, 0]),
+                        _ => core::Vec3b::from([255, 255, 255]),
+                    };
+                    *class_img.at_2d_mut::<core::Vec3b>(y, x)? = color;
+                }
+                if let Some(margin_img) = dbg_margin.as_mut() {
+                    let m_norm = (margin / 8.0).clamp(0.0, 1.0);
+                    *margin_img.at_2d_mut::<u8>(y, x)? = (m_norm * 255.0) as u8;
+                }
+
+                // 通道主导性规则：当某个颜色通道明显主导时，优先按主导色判定。
+                let b = cur_color_bgr.0;
+                let g = cur_color_bgr.1;
+                let r = cur_color_bgr.2;
+                let cmax = r.max(g).max(b);
+                let cmin = r.min(g).min(b);
+                let mut dominant_block = None;
+                if cmax - cmin >= 35.0 {
+                    if r > g + 20.0 && r > b + 20.0 {
+                        dominant_block = Some(QRCodeBlock::Red);
+                    } else if g > r + 20.0 && g > b + 20.0 {
+                        dominant_block = Some(QRCodeBlock::Green);
+                    } else if b > r + 20.0 && b > g + 20.0 {
+                        dominant_block = Some(QRCodeBlock::Blue);
+                    }
+                }
+                if (r - g).abs() < 20.0 && (g - b).abs() < 20.0 && cmin > 90.0 {
+                    dominant_block = Some(QRCodeBlock::White);
+                }
 
                 use crate::shared::QRCodeBlock;
-                let best_block = match (dark_a, dark_b) {
-                    (true, false) => QRCodeBlock::Red,
-                    (false, true) => QRCodeBlock::Green,
-                    (true, true) => QRCodeBlock::Blue,
-                    (false, false) => QRCodeBlock::White,
+                let mut best_block = match best_idx_lab {
+                    0 => QRCodeBlock::Red,
+                    1 => QRCodeBlock::Green,
+                    2 => QRCodeBlock::Blue,
+                    _ => QRCodeBlock::White,
                 };
+
+                // Only trust channel-dominance fallback in ambiguous cases.
+                if margin < 3.0
+                    && let Some(dom) = dominant_block
+                {
+                    best_block = dom;
+                }
+
+                idx_grid[y as usize][x as usize] = block_to_idx(best_block);
 
                 row.push(best_block);
             }
             blocks.push(row);
         }
+
+        // Do not smooth data modules with neighborhood voting.
+        // QR data after masking is intentionally high-frequency/random-like,
+        // and local-consistency priors can introduce burst classification errors.
+
+        for y in 0..m as usize {
+            for x in 0..m as usize {
+                blocks[y][x] = idx_to_block(idx_grid[y][x]);
+            }
+        }
+
         // 2. Override Finder Patterns
         // TL (Red)
         self.overwrite_pattern(&mut blocks, 0, 0, crate::shared::QRCodeBlock::Red);
@@ -1331,7 +1494,6 @@ impl YoloDetector {
         self.overwrite_pattern(&mut blocks, m - 7, 0, crate::shared::QRCodeBlock::Blue);
 
         // 3. Override Alignment Patterns
-        let pos = crate::shared::qr_code_model::get_pattern_position(version);
         for &row in &pos {
             for &col in &pos {
                 // Skip corners covered by finders
@@ -1342,6 +1504,42 @@ impl YoloDetector {
                     continue;
                 }
                 self.overwrite_alignment_pattern(&mut blocks, row, col);
+            }
+        }
+
+        if cfg!(debug_assertions) {
+            if let Some(class_img) = dbg_min_class.as_ref() {
+                let mut class_vis = core::Mat::default();
+                imgproc::resize(
+                    class_img,
+                    &mut class_vis,
+                    Size::new(m * 4, m * 4),
+                    0.0,
+                    0.0,
+                    imgproc::INTER_NEAREST,
+                )?;
+                let _ = opencv::imgcodecs::imwrite(
+                    "debug_dist_min_class.png",
+                    &class_vis,
+                    &core::Vector::new(),
+                );
+            }
+
+            if let Some(margin_img) = dbg_margin.as_ref() {
+                let mut margin_vis = core::Mat::default();
+                imgproc::resize(
+                    margin_img,
+                    &mut margin_vis,
+                    Size::new(m * 4, m * 4),
+                    0.0,
+                    0.0,
+                    imgproc::INTER_NEAREST,
+                )?;
+                let _ = opencv::imgcodecs::imwrite(
+                    "debug_dist_margin.png",
+                    &margin_vis,
+                    &core::Vector::new(),
+                );
             }
         }
 

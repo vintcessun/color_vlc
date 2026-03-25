@@ -302,8 +302,35 @@ impl QRCode {
         });
     }
 
-    fn setup_type_number(&mut self, _test: bool) {
-        // 简化版本
+    fn setup_type_number(&mut self, test: bool) {
+        // Version information (BCH(18,6), generator 0x1f25) for version >= 7.
+        let g18 = (1 << 12) | (1 << 11) | (1 << 10) | (1 << 9) | (1 << 8) | (1 << 5) | (1 << 2) | 1;
+
+        let mut data = self.type_number;
+        let mut d = data << 12;
+        while get_bch_digit(d) - get_bch_digit(g18) >= 0 {
+            d ^= g18 << (get_bch_digit(d) - get_bch_digit(g18));
+        }
+        data = (self.type_number << 12) | d;
+
+        for i in 0..18 {
+            let bit = !test && ((data >> i) & 1) == 1;
+            let block = if bit {
+                QRCodeBlock::Blue
+            } else {
+                QRCodeBlock::White
+            };
+
+            // Top-right 3x6 block
+            let r1 = (i / 3) as usize;
+            let c1 = (i % 3 + self.module_count - 11) as usize;
+            self.modules[r1][c1] = Some(block);
+
+            // Bottom-left 6x3 block
+            let r2 = (i % 3 + self.module_count - 11) as usize;
+            let c2 = (i / 3) as usize;
+            self.modules[r2][c2] = Some(block);
+        }
     }
 
     fn map_data(&mut self, data_a: &[i32], data_b: &[i32]) {
