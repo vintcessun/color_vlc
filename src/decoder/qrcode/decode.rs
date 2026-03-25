@@ -862,6 +862,78 @@ pub fn decode_color_blocks(
     Ok((out_a, out_b))
 }
 
+pub fn decode_color_blocks_robust(
+    blocks: &[Vec<crate::shared::QRCodeBlock>],
+) -> DeQRResult<(Vec<u8>, Vec<u8>)> {
+    use super::SimpleGrid;
+    use crate::shared::QRCodeBlock;
+
+    let size = blocks.len();
+    if size == 0 {
+        return Err(DeQRError::InvalidGridSize);
+    }
+
+    let is_finder_pattern_dark = |x: usize, y: usize| -> bool {
+        let is_in_finder = |lx: usize, ly: usize| -> bool {
+            (lx == 0 || lx == 6 || ly == 0 || ly == 6)
+                || ((2..=4).contains(&lx) && (2..=4).contains(&ly))
+        };
+
+        if x < 7 && y < 7 {
+            return is_in_finder(x, y);
+        }
+        if x >= size - 7 && y < 7 {
+            return is_in_finder(x - (size - 7), y);
+        }
+        if x < 7 && y >= size - 7 {
+            return is_in_finder(x, y - (size - 7));
+        }
+        false
+    };
+
+    let color_idx = |b: &QRCodeBlock| -> usize {
+        match b {
+            QRCodeBlock::Red => 0,
+            QRCodeBlock::Green => 1,
+            QRCodeBlock::Blue => 2,
+            QRCodeBlock::White => 3,
+        }
+    };
+
+    let mut mapping = [2u8, 1u8, 3u8, 0u8];
+
+    // Try all 24 bijections from [Red,Green,Blue,White] -> [10,01,11,00].
+    for _ in 0..24 {
+        let grid_a = SimpleGrid::from_func(size, |x, y| {
+            if is_finder_pattern_dark(x, y) {
+                return true;
+            }
+            let bits = mapping[color_idx(&blocks[y][x])];
+            (bits & 0b10) != 0
+        });
+
+        let grid_b = SimpleGrid::from_func(size, |x, y| {
+            if is_finder_pattern_dark(x, y) {
+                return true;
+            }
+            let bits = mapping[color_idx(&blocks[y][x])];
+            (bits & 0b01) != 0
+        });
+
+        let mut out_a = Vec::new();
+        if decode(&grid_a, &mut out_a).is_ok() {
+            let mut out_b = Vec::new();
+            if decode(&grid_b, &mut out_b).is_ok() {
+                return Ok((out_a, out_b));
+            }
+        }
+
+        next_permutation4(&mut mapping);
+    }
+
+    Err(DeQRError::DataEcc)
+}
+
 /// 使用固化的Version 40和M等级来解码颜色块
 /// 这个函数假设QR码始终是Version 40且使用M等级纠错
 pub fn decode_color_blocks_v40m(
@@ -975,4 +1047,27 @@ where
     }
 
     Err(DeQRError::DataEcc)
+}
+
+fn next_permutation4(a: &mut [u8; 4]) -> bool {
+    let mut i = 2usize;
+    loop {
+        if a[i] < a[i + 1] {
+            break;
+        }
+        if i == 0 {
+            a.reverse();
+            return false;
+        }
+        i -= 1;
+    }
+
+    let mut j = 3usize;
+    while a[j] <= a[i] {
+        j -= 1;
+    }
+
+    a.swap(i, j);
+    a[i + 1..].reverse();
+    true
 }

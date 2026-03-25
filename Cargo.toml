@@ -29,7 +29,6 @@ name = "gen_ideal"
 path = "src/gen_ideal.rs"
 
 [dependencies]
-affinity = { version = "0.1.2", optional = true }
 ndarray = "0.17.2"
 video-rs = { version = "0.10.5", features = ["ndarray"] }
 ffmpeg-next = "7.1"
@@ -42,16 +41,8 @@ rand = "0.10.0"
 g2p = "1.2.2"
 lru = "0.16.3"
 palette = "0.7.6"
-
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-affinity = "0.1.2"
-
-[target.'cfg(not(any(target_os = "macos", target_arch = "x86", target_arch = "arm")))'.dependencies]
 ort = { version = "2.0.0-rc.12", features = ["cuda"] }
 
-[target.'cfg(any(target_os = "macos", target_arch = "x86", target_arch = "arm"))'.dependencies]
-ort = { version = "2.0.0-rc.12" }
 
 [profile.release]
 opt-level = 3

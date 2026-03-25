@@ -1,5 +1,6 @@
 pub use self::decode::{
-    MAX_PAYLOAD_SIZE, MetaData, RawData, Version, decode_color_blocks, decode_color_blocks_v40m,
+    MAX_PAYLOAD_SIZE, MetaData, RawData, Version, decode_color_blocks, decode_color_blocks_robust,
+    decode_color_blocks_v40m,
 };
 use std::error::Error;
 

@@ -1315,8 +1315,11 @@ impl YoloDetector {
         let (ref_red_lab, ref_green_lab, ref_blue_lab, ref_white_lab, channel_gains) =
             self.compute_global_color_refs(rectified, m)?;
 
-        let mut blocks = Vec::with_capacity(m as usize);
+        let mut blocks = vec![vec![crate::shared::QRCodeBlock::White; m as usize]; m as usize];
         let mut idx_grid = vec![vec![3usize; m as usize]; m as usize];
+        let mut conf_grid = vec![vec![0.0f32; m as usize]; m as usize];
+        let mut dist_grid = vec![vec![[0.0f32; 4]; m as usize]; m as usize];
+        let mut seed_mask = vec![vec![false; m as usize]; m as usize];
         let pos = crate::shared::qr_code_model::get_pattern_position(version);
 
         let mut dbg_min_class = if cfg!(debug_assertions) {
@@ -1356,8 +1359,9 @@ impl YoloDetector {
             }
         };
 
+        let refs_lab = [ref_red_lab, ref_green_lab, ref_blue_lab, ref_white_lab];
+
         for y in 0..m {
-            let mut row = Vec::with_capacity(m as usize);
             for x in 0..m {
                 let mx = (x + 1) as f32;
                 let my = (y + 1) as f32;
@@ -1367,6 +1371,7 @@ impl YoloDetector {
                 let mut sum_g = 0.0f32;
                 let mut sum_b = 0.0f32;
                 let mut count = 0;
+                let mut pixel_votes = [0i32; 4];
 
                 // Tighten sampling window to avoid boundary bleed introduced by warp/remap.
                 let px_start = (mx * cell_width + cell_width * 0.3) as i32;
@@ -1378,9 +1383,26 @@ impl YoloDetector {
                     for sx in px_start..px_end {
                         if sx >= 0 && sx < rectified.cols() && sy >= 0 && sy < rectified.rows() {
                             let p = rectified.at_2d::<core::Vec3b>(sy, sx)?;
-                            sum_b += p[0] as f32;
-                            sum_g += p[1] as f32;
-                            sum_r += p[2] as f32;
+                            let b = (p[0] as f32 * channel_gains.0).clamp(0.0, 255.0);
+                            let g = (p[1] as f32 * channel_gains.1).clamp(0.0, 255.0);
+                            let r = (p[2] as f32 * channel_gains.2).clamp(0.0, 255.0);
+
+                            sum_b += b;
+                            sum_g += g;
+                            sum_r += r;
+
+                            let cmax = r.max(g).max(b);
+                            let cmin = r.min(g).min(b);
+                            let delta = cmax - cmin;
+                            if delta < 28.0 && cmin > 95.0 {
+                                pixel_votes[3] += 1; // White
+                            } else if r > g + 16.0 && r > b + 16.0 {
+                                pixel_votes[0] += 1; // Red
+                            } else if g > r + 16.0 && g > b + 16.0 {
+                                pixel_votes[1] += 1; // Green
+                            } else if b > r + 16.0 && b > g + 16.0 {
+                                pixel_votes[2] += 1; // Blue
+                            }
                             count += 1;
                         }
                     }
@@ -1396,18 +1418,13 @@ impl YoloDetector {
                     (255.0, 255.0, 255.0)
                 };
 
-                let cur_color_bgr = (
-                    (cur_color_bgr.0 * channel_gains.0).clamp(0.0, 255.0),
-                    (cur_color_bgr.1 * channel_gains.1).clamp(0.0, 255.0),
-                    (cur_color_bgr.2 * channel_gains.2).clamp(0.0, 255.0),
-                );
-
                 let cur_lab = self.bgr_to_lab(cur_color_bgr.0, cur_color_bgr.1, cur_color_bgr.2);
                 let d_red = self.color_dist(cur_lab, ref_red_lab);
                 let d_green = self.color_dist(cur_lab, ref_green_lab);
                 let d_blue = self.color_dist(cur_lab, ref_blue_lab);
                 let d_white = self.color_dist(cur_lab, ref_white_lab);
                 let dists = [d_red, d_green, d_blue, d_white];
+                dist_grid[y as usize][x as usize] = dists;
 
                 let mut order = [0usize, 1usize, 2usize, 3usize];
                 order.sort_by(|a, b| {
@@ -1433,26 +1450,6 @@ impl YoloDetector {
                     *margin_img.at_2d_mut::<u8>(y, x)? = (m_norm * 255.0) as u8;
                 }
 
-                // 通道主导性规则：当某个颜色通道明显主导时，优先按主导色判定。
-                let b = cur_color_bgr.0;
-                let g = cur_color_bgr.1;
-                let r = cur_color_bgr.2;
-                let cmax = r.max(g).max(b);
-                let cmin = r.min(g).min(b);
-                let mut dominant_block = None;
-                if cmax - cmin >= 35.0 {
-                    if r > g + 20.0 && r > b + 20.0 {
-                        dominant_block = Some(QRCodeBlock::Red);
-                    } else if g > r + 20.0 && g > b + 20.0 {
-                        dominant_block = Some(QRCodeBlock::Green);
-                    } else if b > r + 20.0 && b > g + 20.0 {
-                        dominant_block = Some(QRCodeBlock::Blue);
-                    }
-                }
-                if (r - g).abs() < 20.0 && (g - b).abs() < 20.0 && cmin > 90.0 {
-                    dominant_block = Some(QRCodeBlock::White);
-                }
-
                 use crate::shared::QRCodeBlock;
                 let mut best_block = match best_idx_lab {
                     0 => QRCodeBlock::Red,
@@ -1461,23 +1458,152 @@ impl YoloDetector {
                     _ => QRCodeBlock::White,
                 };
 
-                // Only trust channel-dominance fallback in ambiguous cases.
-                if margin < 3.0
-                    && let Some(dom) = dominant_block
-                {
-                    best_block = dom;
+                let vote_sum: i32 = pixel_votes.iter().sum();
+                let mut vote_strength = 0.0f32;
+                if vote_sum > 0 {
+                    let mut vote_best_idx = 0usize;
+                    let mut vote_best = pixel_votes[0];
+                    for (i, &v) in pixel_votes.iter().enumerate().skip(1) {
+                        if v > vote_best {
+                            vote_best = v;
+                            vote_best_idx = i;
+                        }
+                    }
+                    // Prefer majority vote; keep Lab as fallback for weak votes.
+                    if vote_best * 10 >= vote_sum * 4 || margin < 2.0 {
+                        best_block = match vote_best_idx {
+                            0 => QRCodeBlock::Red,
+                            1 => QRCodeBlock::Green,
+                            2 => QRCodeBlock::Blue,
+                            _ => QRCodeBlock::White,
+                        };
+                    }
+                    vote_strength = vote_best as f32 / vote_sum as f32;
                 }
 
                 idx_grid[y as usize][x as usize] = block_to_idx(best_block);
-
-                row.push(best_block);
+                conf_grid[y as usize][x as usize] = margin + vote_strength * 1.4;
             }
-            blocks.push(row);
         }
 
-        // Do not smooth data modules with neighborhood voting.
-        // QR data after masking is intentionally high-frequency/random-like,
-        // and local-consistency priors can introduce burst classification errors.
+        // Pin all known functional modules as high-confidence seeds.
+        let mut set_seed = |yy: i32, xx: i32, idx: usize| {
+            if yy >= 0 && yy < m && xx >= 0 && xx < m {
+                idx_grid[yy as usize][xx as usize] = idx;
+                seed_mask[yy as usize][xx as usize] = true;
+                conf_grid[yy as usize][xx as usize] = 9.0;
+            }
+        };
+
+        // Finder patterns: TL Red, TR Green, BL Blue.
+        for r in 0..7 {
+            for c in 0..7 {
+                let is_dark =
+                    r == 0 || r == 6 || c == 0 || c == 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4);
+                set_seed(r, c, if is_dark { 0 } else { 3 });
+
+                let tr_c = (m - 7) + c;
+                set_seed(r, tr_c, if is_dark { 1 } else { 3 });
+
+                let bl_r = (m - 7) + r;
+                set_seed(bl_r, c, if is_dark { 2 } else { 3 });
+            }
+        }
+
+        // Alignment patterns are fixed blue+white rings.
+        for &row in &pos {
+            for &col in &pos {
+                if (row <= 8 && col <= 8)
+                    || (row <= 8 && col >= m - 8)
+                    || (row >= m - 8 && col <= 8)
+                {
+                    continue;
+                }
+                for r in -2..=2 {
+                    for c in -2..=2 {
+                        let is_dark = r == -2 || r == 2 || c == -2 || c == 2 || (r == 0 && c == 0);
+                        set_seed(row + r, col + c, if is_dark { 2 } else { 3 });
+                    }
+                }
+            }
+        }
+
+        // Timing pattern is fixed, useful as extra anchors for local-contrast propagation.
+        for i in 8..(m - 8) {
+            let dark = i % 2 == 0;
+            let idx = if dark { 2 } else { 3 };
+            set_seed(6, i, idx);
+            set_seed(i, 6, idx);
+        }
+        // Dark module.
+        let dark_row = version * 4 + 9;
+        set_seed(dark_row, 8, 2);
+
+        // Local contrast propagation for low-confidence cells.
+        for _ in 0..3 {
+            let mut changed = 0usize;
+            for y in 0..m as usize {
+                for x in 0..m as usize {
+                    if seed_mask[y][x] || conf_grid[y][x] >= 2.4 {
+                        continue;
+                    }
+
+                    let mut neigh_w = [0.0f32; 4];
+                    for dy in -1i32..=1 {
+                        for dx in -1i32..=1 {
+                            if dx == 0 && dy == 0 {
+                                continue;
+                            }
+                            let ny = y as i32 + dy;
+                            let nx = x as i32 + dx;
+                            if ny < 0 || ny >= m || nx < 0 || nx >= m {
+                                continue;
+                            }
+                            let nyu = ny as usize;
+                            let nxu = nx as usize;
+                            if seed_mask[nyu][nxu] || conf_grid[nyu][nxu] >= 1.8 {
+                                let c = idx_grid[nyu][nxu];
+                                let base = if seed_mask[nyu][nxu] {
+                                    2.2
+                                } else {
+                                    1.0 + conf_grid[nyu][nxu] * 0.35
+                                };
+                                neigh_w[c] += base;
+                            }
+                        }
+                    }
+
+                    let neigh_sum: f32 = neigh_w.iter().sum();
+                    if neigh_sum < 2.0 {
+                        continue;
+                    }
+
+                    let mut best = idx_grid[y][x];
+                    let mut best_score = f32::INFINITY;
+                    let mut second = f32::INFINITY;
+                    for c in 0..4 {
+                        let score = dist_grid[y][x][c] - neigh_w[c] * 2.3;
+                        if score < best_score {
+                            second = best_score;
+                            best_score = score;
+                            best = c;
+                        } else if score < second {
+                            second = score;
+                        }
+                    }
+
+                    let gain = (second - best_score).max(0.0);
+                    if best != idx_grid[y][x] && (gain > 0.55 || conf_grid[y][x] < 1.2) {
+                        idx_grid[y][x] = best;
+                        conf_grid[y][x] = conf_grid[y][x].max(gain * 0.9);
+                        changed += 1;
+                    }
+                }
+            }
+            if changed == 0 {
+                break;
+            }
+        }
 
         for y in 0..m as usize {
             for x in 0..m as usize {
@@ -1485,18 +1611,12 @@ impl YoloDetector {
             }
         }
 
-        // 2. Override Finder Patterns
-        // TL (Red)
+        // Final hard overrides to avoid accidental drift on functional modules.
         self.overwrite_pattern(&mut blocks, 0, 0, crate::shared::QRCodeBlock::Red);
-        // TR (Green)
         self.overwrite_pattern(&mut blocks, 0, m - 7, crate::shared::QRCodeBlock::Green);
-        // BL (Blue)
         self.overwrite_pattern(&mut blocks, m - 7, 0, crate::shared::QRCodeBlock::Blue);
-
-        // 3. Override Alignment Patterns
         for &row in &pos {
             for &col in &pos {
-                // Skip corners covered by finders
                 if (row <= 8 && col <= 8)
                     || (row <= 8 && col >= m - 8)
                     || (row >= m - 8 && col <= 8)
@@ -1506,6 +1626,30 @@ impl YoloDetector {
                 self.overwrite_alignment_pattern(&mut blocks, row, col);
             }
         }
+
+        if let Some(class_img) = dbg_min_class.as_mut() {
+            for y in 0..m {
+                for x in 0..m {
+                    let color = match idx_grid[y as usize][x as usize] {
+                        0 => core::Vec3b::from([0, 0, 255]),
+                        1 => core::Vec3b::from([0, 255, 0]),
+                        2 => core::Vec3b::from([255, 0, 0]),
+                        _ => core::Vec3b::from([255, 255, 255]),
+                    };
+                    *class_img.at_2d_mut::<core::Vec3b>(y, x)? = color;
+                }
+            }
+        }
+        if let Some(margin_img) = dbg_margin.as_mut() {
+            for y in 0..m {
+                for x in 0..m {
+                    let m_norm = (conf_grid[y as usize][x as usize] / 4.0).clamp(0.0, 1.0);
+                    *margin_img.at_2d_mut::<u8>(y, x)? = (m_norm * 255.0) as u8;
+                }
+            }
+        }
+
+        let _ = refs_lab;
 
         if cfg!(debug_assertions) {
             if let Some(class_img) = dbg_min_class.as_ref() {
