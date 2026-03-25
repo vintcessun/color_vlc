@@ -1,19 +1,13 @@
 use crate::shared::{
     qr_8bit_byte::QR8bitByte,
     qr_bit_buffer::BitBuffer,
-    qr_code_model::{PATTERN_POSITION_TABLE, QRErrorCorrectLevel, QRMode, get_type_number},
+    qr_code_model::{
+        PATTERN_POSITION_TABLE, QRCodeBlock, QRErrorCorrectLevel, QRMode, get_type_number,
+    },
     qr_polynomial::Polynomial,
     qr_rs_block::get_rs_blocks,
     qr_util::{get_bch_digit, get_length_in_bits},
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum QRCodeBlock {
-    Red,
-    Green,
-    Blue,
-    White,
-}
 
 #[derive(Clone)]
 pub struct QRCodeOptions {

@@ -5,12 +5,14 @@ pub mod qr_math;
 pub mod qr_polynomial;
 pub mod qr_rs_block;
 pub mod qr_util;
+pub mod qr_version;
 
 pub use qr_8bit_byte::QR8bitByte;
 pub use qr_bit_buffer::BitBuffer;
-pub use qr_code_model::{QRErrorCorrectLevel, QRMode};
+pub use qr_code_model::{QRCodeBlock, QRErrorCorrectLevel, QRMode};
 pub use qr_math::QRMath;
 pub use qr_polynomial::Polynomial;
 pub use qr_rs_block::{QRRSBlock, get_rs_blocks};
+pub use qr_version::{RSParameters, VERSION_DATA_BASE, VersionInfo};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

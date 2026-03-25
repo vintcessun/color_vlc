@@ -1,4 +1,5 @@
-use color_vlc::encoder::qrcode::{QRCode, QRCodeBlock};
+use color_vlc::encoder::qrcode::QRCode;
+use color_vlc::shared::QRCodeBlock;
 use color_vlc::shared::qr_code_model::QRErrorCorrectLevel;
 use image::{Rgb, RgbImage};
 use rand::RngExt;

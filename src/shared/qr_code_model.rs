@@ -1,3 +1,11 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum QRCodeBlock {
+    Red,
+    Green,
+    Blue,
+    White,
+}
+
 pub struct QRMode;
 
 impl QRMode {

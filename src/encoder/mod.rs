@@ -8,7 +8,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use crate::encoder::qrcode::{QRCode, QRCodeBlock};
+use crate::encoder::qrcode::QRCode;
+use crate::shared::QRCodeBlock;
 use crate::shared::qr_code_model::QRErrorCorrectLevel;
 
 pub struct ColorEncoder {

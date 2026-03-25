@@ -1,7 +1,8 @@
 pub mod qr_code;
 
-pub use qr_code::{QRCode, QRCodeBlock, QRCodeOptions};
+pub use qr_code::{QRCode, QRCodeOptions};
 
+use crate::shared::qr_code_model::QRCodeBlock;
 pub use crate::shared::{
     qr_8bit_byte::QR8bitByte,
     qr_bit_buffer::BitBuffer,

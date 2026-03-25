@@ -1,2 +1,7 @@
 /target
 /train/dataset
+/train/__pycache__
+/train/last
+/train/stage1_dataset
+/train/stage2_dataset
+/mpv
