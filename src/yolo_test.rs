@@ -59,14 +59,15 @@ fn sample_blocks_from_ideal_image(
 
 fn sample_blocks_with_params(
     img: &core::Mat,
-    version: i32,
     start_ratio: f32,
     end_ratio: f32,
     white_delta: f32,
     white_min: f32,
     dom_margin: f32,
 ) -> Result<Vec<Vec<QRCodeBlock>>> {
-    let m = (version - 1) * 4 + 21;
+    // Hardcoded for Version 40 QR code
+    const M: i32 = 177;
+    let m = M;
     let n = m + 2;
     let cw = img.cols() as f32 / n as f32;
     let ch = img.rows() as f32 / n as f32;
@@ -228,8 +229,8 @@ fn run_test(detector: &mut YoloDetector, input_path: &str, output_prefix: &str) 
         );
 
         // --- NEW: Sample and Decode ---
-        let version = 40;
-        let blocks = detector.sample_grid(&stage2_res.rectified, version)?;
+        // Version 40 hardcoded in sample_grid
+        let blocks = detector.sample_grid(&stage2_res.rectified)?;
         println!("  Sampled {}x{} grid", blocks.len(), blocks[0].len());
 
         // Export Sampled Bits as BMP for debugging
@@ -337,7 +338,7 @@ fn run_test(detector: &mut YoloDetector, input_path: &str, output_prefix: &str) 
                             core::Scalar::default(),
                         )?;
 
-                        let shifted_blocks = detector.sample_grid(&shifted, version)?;
+                        let shifted_blocks = detector.sample_grid(&shifted)?;
                         if let Ok((data_a, data_b)) = decode_color_blocks_robust(&shifted_blocks) {
                             println!("  Recovered by phase search: dx={}, dy={}", dx, dy);
                             println!("  Stream A (hex): {:02X?}", data_a);
@@ -358,7 +359,6 @@ fn run_test(detector: &mut YoloDetector, input_path: &str, output_prefix: &str) 
                                 for &dom_margin in &[10.0, 16.0, 22.0, 28.0] {
                                     let brute_blocks = sample_blocks_with_params(
                                         &stage2_res.rectified,
-                                        version,
                                         start_ratio,
                                         end_ratio,
                                         white_delta,
@@ -430,7 +430,7 @@ fn run_direct_grid_test(detector: &mut YoloDetector, input_path: &str) -> Result
         }
     }
 
-    let blocks = detector.sample_grid(&rectified, 40)?;
+    let blocks = detector.sample_grid(&rectified)?;
 
     match decode_color_blocks(&blocks) {
         Ok((data_a, data_b)) => {

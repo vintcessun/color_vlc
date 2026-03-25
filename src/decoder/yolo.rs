@@ -1304,9 +1304,11 @@ impl YoloDetector {
     pub fn sample_grid(
         &self,
         rectified: &core::Mat,
-        version: i32,
     ) -> Result<Vec<Vec<crate::shared::QRCodeBlock>>> {
-        let m = (version - 1) * 4 + 21;
+        // Hardcoded for Version 40 QR code
+        const VERSION: i32 = 40;
+        const M: i32 = 177;  // (40 - 1) * 4 + 21 = 177
+        let m = M;
         let n = m + 2;
         let cell_width = rectified.cols() as f32 / n as f32;
         let cell_height = rectified.rows() as f32 / n as f32;
@@ -1320,7 +1322,7 @@ impl YoloDetector {
         let mut conf_grid = vec![vec![0.0f32; m as usize]; m as usize];
         let mut dist_grid = vec![vec![[0.0f32; 4]; m as usize]; m as usize];
         let mut seed_mask = vec![vec![false; m as usize]; m as usize];
-        let pos = crate::shared::qr_code_model::get_pattern_position(version);
+        let pos = crate::shared::qr_code_model::get_pattern_position(VERSION);
 
         let mut dbg_min_class = if cfg!(debug_assertions) {
             Some(core::Mat::new_size_with_default(
@@ -1372,6 +1374,7 @@ impl YoloDetector {
                 let mut sum_b = 0.0f32;
                 let mut count = 0;
                 let mut pixel_votes = [0i32; 4];
+                let mut soft_weights = [0.0f32; 4];
 
                 // Tighten sampling window to avoid boundary bleed introduced by warp/remap.
                 let px_start = (mx * cell_width + cell_width * 0.3) as i32;
@@ -1402,6 +1405,16 @@ impl YoloDetector {
                                 pixel_votes[1] += 1; // Green
                             } else if b > r + 16.0 && b > g + 16.0 {
                                 pixel_votes[2] += 1; // Blue
+                            }
+
+                            let pixel_lab = self.bgr_to_lab(b, g, r);
+                            for (i, ref_lab) in refs_lab.iter().enumerate() {
+                                let dist = self.color_dist(pixel_lab, *ref_lab);
+                                let mut w = (-dist / 8.0).exp();
+                                if i == 3 {
+                                    w *= 0.94;
+                                }
+                                soft_weights[i] += w;
                             }
                             count += 1;
                         }
@@ -1436,6 +1449,19 @@ impl YoloDetector {
                 let second_idx_lab = order[1];
                 let margin = dists[second_idx_lab] - dists[best_idx_lab];
 
+                let mut soft_order = [0usize, 1usize, 2usize, 3usize];
+                soft_order.sort_by(|a, b| {
+                    soft_weights[*b]
+                        .partial_cmp(&soft_weights[*a])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let best_idx_soft = soft_order[0];
+                let second_idx_soft = soft_order[1];
+                let soft_sum = soft_weights.iter().sum::<f32>().max(1e-6);
+                let soft_share = soft_weights[best_idx_soft] / soft_sum;
+                let soft_gap =
+                    (soft_weights[best_idx_soft] - soft_weights[second_idx_soft]) / soft_sum;
+
                 if let Some(class_img) = dbg_min_class.as_mut() {
                     let color = match best_idx_lab {
                         0 => core::Vec3b::from([0, 0, 255]),
@@ -1451,12 +1477,10 @@ impl YoloDetector {
                 }
 
                 use crate::shared::QRCodeBlock;
-                let mut best_block = match best_idx_lab {
-                    0 => QRCodeBlock::Red,
-                    1 => QRCodeBlock::Green,
-                    2 => QRCodeBlock::Blue,
-                    _ => QRCodeBlock::White,
-                };
+                let mut best_idx = best_idx_lab;
+                if soft_share > 0.35 && soft_gap > 0.08 {
+                    best_idx = best_idx_soft;
+                }
 
                 let vote_sum: i32 = pixel_votes.iter().sum();
                 let mut vote_strength = 0.0f32;
@@ -1469,20 +1493,21 @@ impl YoloDetector {
                             vote_best_idx = i;
                         }
                     }
-                    // Prefer majority vote; keep Lab as fallback for weak votes.
-                    if vote_best * 10 >= vote_sum * 4 || margin < 2.0 {
-                        best_block = match vote_best_idx {
-                            0 => QRCodeBlock::Red,
-                            1 => QRCodeBlock::Green,
-                            2 => QRCodeBlock::Blue,
-                            _ => QRCodeBlock::White,
-                        };
+                    if vote_best * 10 >= vote_sum * 4 || margin < 2.0 || soft_gap < 0.04 {
+                        best_idx = vote_best_idx;
                     }
                     vote_strength = vote_best as f32 / vote_sum as f32;
                 }
 
+                let best_block = match best_idx {
+                    0 => QRCodeBlock::Red,
+                    1 => QRCodeBlock::Green,
+                    2 => QRCodeBlock::Blue,
+                    _ => QRCodeBlock::White,
+                };
+
                 idx_grid[y as usize][x as usize] = block_to_idx(best_block);
-                conf_grid[y as usize][x as usize] = margin + vote_strength * 1.4;
+                conf_grid[y as usize][x as usize] = margin + vote_strength * 1.1 + soft_gap * 2.0;
             }
         }
 
@@ -1536,19 +1561,57 @@ impl YoloDetector {
             set_seed(i, 6, idx);
         }
         // Dark module.
-        let dark_row = version * 4 + 9;
-        set_seed(dark_row, 8, 2);
+        const DARK_ROW: i32 = 169;  // 40 * 4 + 9 = 169
+        set_seed(DARK_ROW, 8, 2);
 
-        // Local contrast propagation for low-confidence cells.
-        for _ in 0..3 {
-            let mut changed = 0usize;
+        // BFS-based layered expansion from seed points (三个定位块 → 内部对齐块 → 全图扩展)
+        // 第一步：计算每个 cell 到最近 seed 点的距离（BFS）
+        let mut dist_to_seed = vec![vec![i32::MAX; m as usize]; m as usize];
+        let mut queue = std::collections::VecDeque::new();
+
+        for y in 0..m as usize {
+            for x in 0..m as usize {
+                if seed_mask[y][x] {
+                    dist_to_seed[y][x] = 0;
+                    queue.push_back((y, x));
+                }
+            }
+        }
+
+        // BFS to compute distance to nearest seed
+        while let Some((y, x)) = queue.pop_front() {
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let ny = y as i32 + dy;
+                    let nx = x as i32 + dx;
+                    if ny >= 0 && ny < m && nx >= 0 && nx < m {
+                        let nyu = ny as usize;
+                        let nxu = nx as usize;
+                        if dist_to_seed[nyu][nxu] > dist_to_seed[y][x] + 1 {
+                            dist_to_seed[nyu][nxu] = dist_to_seed[y][x] + 1;
+                            queue.push_back((nyu, nxu));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 第二步：按距离分层处理，从距离 1 开始逐层扩展
+        // 对于每一层的 cell，利用已确定的邻居（距离更小或等于当前距离的）来推导颜色
+        for target_dist in 1..m {
             for y in 0..m as usize {
                 for x in 0..m as usize {
-                    if seed_mask[y][x] || conf_grid[y][x] >= 2.4 {
+                    if seed_mask[y][x] || dist_to_seed[y][x] != target_dist {
                         continue;
                     }
 
+                    // 收集所有已确定邻居（距离更近的 seed 或高信心 cell）的信息
                     let mut neigh_w = [0.0f32; 4];
+                    let mut has_strong_neighbor = false;
+
                     for dy in -1i32..=1 {
                         for dx in -1i32..=1 {
                             if dx == 0 && dy == 0 {
@@ -1561,28 +1624,38 @@ impl YoloDetector {
                             }
                             let nyu = ny as usize;
                             let nxu = nx as usize;
-                            if seed_mask[nyu][nxu] || conf_grid[nyu][nxu] >= 1.8 {
+
+                            // 使用距离更近的邻居或已处理的同层邻居
+                            if dist_to_seed[nyu][nxu] < dist_to_seed[y][x]
+                                || (dist_to_seed[nyu][nxu] == dist_to_seed[y][x]
+                                    && (seed_mask[nyu][nxu] || conf_grid[nyu][nxu] >= 2.0))
+                            {
                                 let c = idx_grid[nyu][nxu];
-                                let base = if seed_mask[nyu][nxu] {
-                                    2.2
+                                let base_weight = if seed_mask[nyu][nxu] {
+                                    3.0 // seed点权重最高
                                 } else {
-                                    1.0 + conf_grid[nyu][nxu] * 0.35
+                                    1.5 + conf_grid[nyu][nxu] * 0.4
                                 };
-                                neigh_w[c] += base;
+                                neigh_w[c] += base_weight;
+                                has_strong_neighbor = true;
                             }
                         }
                     }
 
-                    let neigh_sum: f32 = neigh_w.iter().sum();
-                    if neigh_sum < 2.0 {
+                    if !has_strong_neighbor {
                         continue;
                     }
 
+                    let neigh_sum: f32 = neigh_w.iter().sum();
+
+                    // 综合考虑：Lab 距离 + 邻居投票 + 像素级投票
                     let mut best = idx_grid[y][x];
                     let mut best_score = f32::INFINITY;
                     let mut second = f32::INFINITY;
+
                     for c in 0..4 {
-                        let score = dist_grid[y][x][c] - neigh_w[c] * 2.3;
+                        // 分数 = Lab距离 - 邻居支持权重（权重高说明应该是该颜色）
+                        let score = dist_grid[y][x][c] - neigh_w[c] * 2.5;
                         if score < best_score {
                             second = best_score;
                             best_score = score;
@@ -1593,15 +1666,15 @@ impl YoloDetector {
                     }
 
                     let gain = (second - best_score).max(0.0);
-                    if best != idx_grid[y][x] && (gain > 0.55 || conf_grid[y][x] < 1.2) {
-                        idx_grid[y][x] = best;
-                        conf_grid[y][x] = conf_grid[y][x].max(gain * 0.9);
-                        changed += 1;
+
+                    // 更新决策：当邻居投票明确或Lab距离差异明显时更新
+                    if neigh_sum > 3.0 || gain > 1.2 {
+                        if best != idx_grid[y][x] || gain > 0.8 {
+                            idx_grid[y][x] = best;
+                            conf_grid[y][x] = 2.0 + gain.min(3.0); // 保证这层的置信度足以支撑下一层
+                        }
                     }
                 }
-            }
-            if changed == 0 {
-                break;
             }
         }
 
