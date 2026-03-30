@@ -8,3 +8,11 @@
 /debug
 /testcase
 /app_data
+/process_bins.py
+/process_data.py
+/pack.bat
+/decoder.dist
+/decoder.build
+/nuitka-crash-report.xml
+/decoder.exe
+/encoder.exe

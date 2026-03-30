@@ -148,7 +148,14 @@ impl ColorEncoder {
         f.read_to_end(&mut data)?;
 
         let chunk_size = self.get_dynamic_chunk_size();
-        let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
+        let mut chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
+
+        let fps = 30.0;
+        let max_frames = (max_ms as f64 / 1000.0 * fps).floor() as usize;
+
+        if chunks.len() > max_frames * 2 {
+            chunks.truncate(max_frames * 2);
+        }
 
         let mut pairs = Vec::new();
         for i in (0..chunks.len()).step_by(2) {
@@ -162,16 +169,11 @@ impl ColorEncoder {
         }
 
         let total_frames = pairs.len();
-        let mut fps = 30.0;
-        if (total_frames as f64 / fps) * 1000.0 > max_ms as f64 {
-            fps = (total_frames as f64 / (max_ms as f64 / 1000.0)).ceil();
-        }
+        let total_bytes: usize = chunks.iter().map(|c| c.len()).sum();
 
         println!(
-            "Encoding {} bytes into {} frames at {} FPS...",
-            data.len(),
-            total_frames,
-            fps
+            "Encoding {} bytes into {} frames at {} FPS (max_ms: {}ms)...",
+            total_bytes, total_frames, fps, max_ms
         );
 
         // 使用 ffmpeg-next
