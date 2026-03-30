@@ -36,8 +36,8 @@ def export_stage2():
     print(f"Exporting Stage 2: {s2_pt}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 严格按照 model_stage2_new.py
-    model = ColorQRStage2New(pretrained_locnet=False, out_size=800).to(device)
+    # 严格按照 model_stage2_new.py（OUT_SIZE=512, NUM_KPT=40, V30）
+    model = ColorQRStage2New(pretrained_locnet=False, out_size=OUT_SIZE).to(device)
 
     state_dict = torch.load(s2_pt, map_location=device)
     if isinstance(state_dict, dict) and "model" in state_dict:
@@ -47,8 +47,8 @@ def export_stage2():
 
     model.eval()
 
-    # 严格按照 OUT_SIZE = 800
-    dummy_input = torch.randn(1, 3, 800, 800).to(device)
+    # 严格按照 OUT_SIZE = 512
+    dummy_input = torch.randn(1, 3, OUT_SIZE, OUT_SIZE).to(device)
     onnx_path = "train/stage2.onnx"
 
     # 导出
@@ -63,8 +63,8 @@ def export_stage2():
         output_names=["pred_pts", "rectified"],
         dynamic_axes={
             "input": {0: "batch_size"},
-            "pred_pts": {0: "batch_size"},
-            "rectified": {0: "batch_size"},
+            "pred_pts": {0: "batch_size"},  # (B, 40, 2)
+            "rectified": {0: "batch_size"},  # (B, 3, 512, 512)
         },
     )
     print(f"Stage 2 ONNX exported to: {onnx_path}")

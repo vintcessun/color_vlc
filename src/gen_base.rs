@@ -24,14 +24,10 @@ fn main() -> anyhow::Result<()> {
 
     for i in 0..count {
         let mut qr = QRCode::new();
-        qr.type_number = 40;
+        qr.type_number = 30; // Version 30
         qr.options.correct_level = QRErrorCorrectLevel::M;
 
-        // Version 40 L 的容量是 2953 字节。每帧包含 payload_a (A) 和 payload_b (B)。
-        // 参考 src/encoder/mod.rs: get_dynamic_chunk_size() -> max_bytes - 15
-        // payload 还会包含 10 字节的头信息。
-        // 所以我们模拟生成的 raw 数据长度应该在 2900 左右。
-        let data_len = 2900;
+        let data_len = 2280;
         let data_a: Vec<u8> = (0..data_len).map(|_| rng.random()).collect();
         let data_b: Vec<u8> = (0..data_len).map(|_| rng.random()).collect();
 

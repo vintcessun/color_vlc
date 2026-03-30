@@ -4,11 +4,11 @@ model_stage2_new.py — STN/TPS 亚像素对齐模型（增强版）
 
 架构：
     ColorQRStage2New
-    ├── LocalizationNet  (MobileNetV3-Small backbone → 53×2 关键点预测)
+    ├── LocalizationNet  (MobileNetV3-Small backbone → 40×2 关键点预测)
     └── TPSSpatialTransformer  (TPS 薄板样条空间变换，输入图 → 标准化对齐图)
 
 TPS 原理：
-  控制点 ctrl_pts 固定为标准 V40 量子坐标（canonical space，[-1,1]）。
+    控制点 ctrl_pts 固定为标准 V30 量子坐标（canonical space，[-1,1]）。
   LocalizationNet 预测 pred_pts：这些控制点在输入失真图中的对应位置（[-1,1]）。
   TPS 求解 F(ctrl_pts[i]) = pred_pts[i] 的薄板样条函数 F: R²→R²。
   对输出规则网格中每个像素查询 F，得到在输入图中的采样坐标，送入 grid_sample。
@@ -25,19 +25,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as tvm
 
-NUM_KPT = 53
-OUT_SIZE = 800
+NUM_KPT = 40
+OUT_SIZE = 512
 HEATMAP_UPSCALE = 4.0
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Version-40 关键点布局（与 generate_stage2_dataset.py 完全一致）
+# Version-30 关键点布局（与 generate_stage2_dataset.py 完全一致）
 # ─────────────────────────────────────────────────────────────────────────────
-QR_MODULE_COUNT = 177
+QR_MODULE_COUNT = 137
 QR_BOX_SIZE = 4
 QR_BORDER = 1
-QR_ALIGN_POS = [6, 30, 58, 86, 114, 142, 170]
-_FINDER_OVERLAP = {(6, 6), (6, 170), (170, 6)}
-IDX_TL, IDX_TR, IDX_BR, IDX_BL = 49, 50, 51, 52
+QR_ALIGN_POS = [6, 26, 52, 78, 104, 130]
+_FINDER_OVERLAP = {(6, 6), (6, 130), (130, 6)}
+IDX_TL, IDX_TR, IDX_BR, IDX_BL = 36, 37, 38, 39
 
 
 def _module_center_px(row: int, col: int):
@@ -47,7 +47,7 @@ def _module_center_px(row: int, col: int):
 
 
 def _get_base_kpts() -> np.ndarray:
-    """返回 716×716 base 图中 53 个关键点的像素坐标 (53,2)。"""
+    """返回 556×556 base 图中 40 个关键点的像素坐标 (40,2)。"""
     kpts = []
     kpts.append(_module_center_px(3, 3))
     kpts.append(_module_center_px(3, QR_MODULE_COUNT - 4))
@@ -77,12 +77,12 @@ def _get_base_kpts() -> np.ndarray:
 
 def _compute_canon_kpts_norm(out_size: int = OUT_SIZE) -> np.ndarray:
     """
-    计算 53 个关键点在 out_size×out_size 标准图中的归一化坐标 ([-1,1])。
+    计算 40 个关键点在 out_size×out_size 标准图中的归一化坐标 ([-1,1])。
 
     方法：将 base 图中的四角点作为透视变换源，映射到 out_size×out_size 四角，
-    用同一透视矩阵变换全部 53 个点，然后按 align_corners=True 规范归一化。
+    用同一透视矩阵变换全部 40 个点，然后按 align_corners=True 规范归一化。
     """
-    base_kpts = _get_base_kpts()  # (53,2)
+    base_kpts = _get_base_kpts()  # (40,2)
     corners_src = base_kpts[[IDX_TL, IDX_TR, IDX_BR, IDX_BL]]  # (4,2)
     s = float(out_size - 1)
     corners_dst = np.array([[0, 0], [s, 0], [s, s], [0, s]], dtype=np.float32)
@@ -93,7 +93,7 @@ def _compute_canon_kpts_norm(out_size: int = OUT_SIZE) -> np.ndarray:
 
     half = (out_size - 1) / 2.0  # 255.5 for 512px
     canon_norm = (canon_512 / half) - 1.0
-    return canon_norm.astype(np.float32)  # (53,2), ~ [-1,1]
+    return canon_norm.astype(np.float32)  # (40,2), ~ [-1,1]
 
 
 # 模块级预计算（所有实例共享）
@@ -242,7 +242,7 @@ class SpatialSoftArgmax2D(nn.Module):
 class LocalizationNet(nn.Module):
     """
     输入：(B, 3, H, W) 失真 QR 图，float [0,1]。
-    输出：(B, 53, 2) 预测关键点坐标，范围 [-1,1]。
+    输出：(B, 40, 2) 预测关键点坐标，范围 [-1,1]。
 
         使用 ImageNet 预训练的 MobileNetV3-Small 作为特征提取 backbone，
         采用“高分辨率积分回归（Integral Regression）”：
@@ -297,28 +297,28 @@ class LocalizationNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feat = self.features(x)  # (B, 576, H/32, W/32)
         feat = self.neck(feat)  # (B, 128, H/8, W/8)
-        heatmaps = self.heatmap_head(feat)  # (B, 53, H/8, W/8)
+        heatmaps = self.heatmap_head(feat)  # (B, 40, H/8, W/8)
         heatmaps_up = F.interpolate(
             heatmaps,
             scale_factor=HEATMAP_UPSCALE,
             mode="bilinear",
             align_corners=False,
         )
-        coords = self.soft_argmax(heatmaps_up)  # (B, 53, 2)
+        coords = self.soft_argmax(heatmaps_up)  # (B, 40, 2)
         return coords
 
     def forward_with_heatmaps(self, x: torch.Tensor):
         """返回坐标与上采样后的 heatmaps，便于调试可视化。"""
         feat = self.features(x)  # (B, 576, H/32, W/32)
         feat = self.neck(feat)  # (B, 128, H/8, W/8)
-        heatmaps = self.heatmap_head(feat)  # (B, 53, H/8, W/8)
+        heatmaps = self.heatmap_head(feat)  # (B, 40, H/8, W/8)
         heatmaps_up = F.interpolate(
             heatmaps,
             scale_factor=HEATMAP_UPSCALE,
             mode="bilinear",
             align_corners=False,
         )
-        coords = self.soft_argmax(heatmaps_up)  # (B, 53, 2)
+        coords = self.soft_argmax(heatmaps_up)  # (B, 40, 2)
         return coords, heatmaps_up
 
 
@@ -333,7 +333,7 @@ class ColorQRStage2New(nn.Module):
     img  (B, 3, H, W) — Stage 1 裁剪的失真 QR 图，float [0,1]
 
     Forward 输出（tuple）：
-      pred_pts   (B, 53, 2) — 预测关键点坐标（输入图空间，[-1,1]）
+            pred_pts   (B, 40, 2) — 预测关键点坐标（输入图空间，[-1,1]）
     rectified  (B, 3, OUT_SIZE, OUT_SIZE) — TPS 矫正后的标准对齐图，float [0,1]
     """
 
@@ -345,7 +345,7 @@ class ColorQRStage2New(nn.Module):
         super().__init__()
         self.locnet = LocalizationNet(pretrained=pretrained_locnet)
         self.tps = TPSSpatialTransformer(
-            ctrl_pts=CANON_KPTS_NORM,  # (53,2) fixed
+            ctrl_pts=CANON_KPTS_NORM,  # (40,2) fixed
             grid_h=out_size,
             grid_w=out_size,
         )
@@ -356,6 +356,6 @@ class ColorQRStage2New(nn.Module):
             rectified = self.tps(img, pred_pts)  # (B, 3, out_size, out_size)
             return pred_pts, rectified, heatmaps
 
-        pred_pts = self.locnet(img)  # (B, 53, 2)
+        pred_pts = self.locnet(img)  # (B, 40, 2)
         rectified = self.tps(img, pred_pts)  # (B, 3, out_size, out_size)
         return pred_pts, rectified

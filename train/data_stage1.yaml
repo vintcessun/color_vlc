@@ -1,0 +1,9 @@
+
+path: C:\Users\vintces\Desktop\rust\color_vlc\train\stage1_dataset
+train: images
+val: images
+
+kpt_shape: [4, 3]
+
+names:
+  0: color_qr

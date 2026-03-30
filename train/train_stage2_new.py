@@ -44,13 +44,13 @@ from model_stage2_new import (
     ColorQRStage2New,
     CANON_KPTS_NORM,
     OUT_SIZE,
-)  # CANON_KPTS_NORM:(53,2)
+)  # CANON_KPTS_NORM:(40,2)
 
-NUM_KPT = 53
+NUM_KPT = 40
 
 # 关键点加权：3个 Finder 中心 + 4个角点权重更高，减少全局漂移
 FINDER_INDICES = [0, 1, 2]
-CORNER_INDICES = [49, 50, 51, 52]
+CORNER_INDICES = [36, 37, 38, 39]
 FINDER_WEIGHT = 4.5
 CORNER_WEIGHT = 7.0
 
@@ -125,7 +125,7 @@ class Stage2Dataset(Dataset):
     """
     每个样本：
     img   : (3, OUT_SIZE, OUT_SIZE) float32  [0, 1]
-      kpts  : (53, 2)       float32  [-1, 1]
+    kpts  : (40, 2)       float32  [-1, 1]
     """
 
     def __init__(self, img_dir: str, label_dir: str):
@@ -149,7 +149,12 @@ class Stage2Dataset(Dataset):
         if img.size != (OUT_SIZE, OUT_SIZE):
             img = img.resize((OUT_SIZE, OUT_SIZE), resample=Image.BILINEAR)
         img_t = TF.to_tensor(img)  # (3,512,512) float [0,1]
-        kpts = np.load(lbl_path).astype(np.float32)  # (53,2) float [-1,1]
+        kpts = np.load(lbl_path).astype(np.float32)
+        if kpts.shape != (NUM_KPT, 2):
+            raise RuntimeError(
+                f"Label shape mismatch for {lbl_path}: expected ({NUM_KPT},2), got {kpts.shape}. "
+                "Please regenerate stage2_dataset with Version-30 format."
+            )
         return img_t, torch.from_numpy(kpts)
 
 
@@ -287,8 +292,8 @@ def _draw_kpts(
 def save_comparison(
     img_t: torch.Tensor,  # (3,H,W) 原始失真输入
     rect_t: torch.Tensor,  # (3,H,W) TPS 矫正后
-    gt_kpts: torch.Tensor,  # (53,2)  GT 关键点
-    pred_kpts: torch.Tensor,  # (53,2)  预测关键点
+    gt_kpts: torch.Tensor,  # (40,2)  GT 关键点
+    pred_kpts: torch.Tensor,  # (40,2)  预测关键点
     save_path: str,
 ):
     """
@@ -313,7 +318,7 @@ def save_comparison(
 
 
 def _build_kpt_weights(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """构建 (53,) 权重向量。"""
+    """构建 (40,) 权重向量。"""
     w = torch.ones(NUM_KPT, device=device, dtype=dtype)
     w[FINDER_INDICES] = FINDER_WEIGHT
     w[CORNER_INDICES] = CORNER_WEIGHT
@@ -337,7 +342,7 @@ def _weighted_kpt_wing(
     if x < w:   wing = w * log(1 + x / epsilon)
     else:       wing = x - c
     """
-    x = torch.abs(pred_kpts - gt_kpts)  # (B,53,2)
+    x = torch.abs(pred_kpts - gt_kpts)  # (B,40,2)
     c = w * (1.0 - math.log(1.0 + w / epsilon))
     wing = torch.where(
         x < w,
@@ -349,7 +354,7 @@ def _weighted_kpt_wing(
     wing_small = torch.where(x < w, wing, torch.zeros_like(wing))
     wing_large = torch.where(x < w, torch.zeros_like(wing), wing)
 
-    # (B,53)
+    # (B,40)
     per_kpt_err = wing.mean(dim=-1)
     per_kpt_small = wing_small.mean(dim=-1)
     per_kpt_large = wing_large.mean(dim=-1)

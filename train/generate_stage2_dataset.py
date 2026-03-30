@@ -31,24 +31,24 @@ import cv2
 import numpy as np
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Version-40 关键点布局常量（与 process_dataset.py / gen_base.rs 保持一致）
+# Version-30 关键点布局常量
 # ─────────────────────────────────────────────────────────────────────────────
-QR_MODULE_COUNT = 177
+QR_MODULE_COUNT = 137
 QR_BOX_SIZE = 4
 QR_BORDER = 1
 QR_IMG_SIZE = (QR_MODULE_COUNT + 2 * QR_BORDER) * QR_BOX_SIZE  # 716
 
-QR_ALIGN_POS = [6, 30, 58, 86, 114, 142, 170]
-_FINDER_OVERLAP = {(6, 6), (6, 170), (170, 6)}
+QR_ALIGN_POS = [6, 26, 52, 78, 104, 130]
+_FINDER_OVERLAP = {(6, 6), (6, 130), (130, 6)}
 
-# 53 个关键点索引定义
+# 40 个关键点索引定义（3 finder + 33 alignment + 4 corners）
 IDX_F0, IDX_F1, IDX_F2 = 0, 1, 2  # Finder 中心（3 个）
-IDX_ALIGN_START, IDX_ALIGN_END = 3, 49  # Alignment 中心（[3..48]，46 个）
-IDX_TL, IDX_TR, IDX_BR, IDX_BL = 49, 50, 51, 52  # 4 角点
-NUM_KPT = 53
+IDX_ALIGN_START, IDX_ALIGN_END = 3, 36  # Alignment 中心（[3..35]，33 个）
+IDX_TL, IDX_TR, IDX_BR, IDX_BL = 36, 37, 38, 39  # 4 角点
+NUM_KPT = 40
 
-# Stage 2 模型预测的关键点数（全量 53 个）
-NUM_KPT_STAGE2 = 53
+# Stage 2 标签关键点数（Version-30）
+NUM_KPT_STAGE2 = 40
 
 
 def _module_center_px(row: int, col: int) -> tuple:
@@ -60,9 +60,9 @@ def _module_center_px(row: int, col: int) -> tuple:
 
 def get_base_keypoints() -> np.ndarray:
     """
-    返回 716×716 base 图坐标系中 53 个关键点的 (x, y) 数组，形状 (53, 2)。
+    返回 556×556 base 图坐标系中 40 个关键点的 (x, y) 数组，形状 (40, 2)。
     顺序：[Red Finder, Green Finder, Blue Finder,
-           46× Alignment (行优先), TL, TR, BR, BL]
+           33× Alignment (行优先), TL, TR, BR, BL]
     """
     kpts = []
 
@@ -71,7 +71,7 @@ def get_base_keypoints() -> np.ndarray:
     kpts.append(_module_center_px(3, QR_MODULE_COUNT - 4))  # Green [1]
     kpts.append(_module_center_px(QR_MODULE_COUNT - 4, 3))  # Blue  [2]
 
-    # ── Alignment Pattern 中心（46 个，行优先排列）────────────────────────────
+    # ── Alignment Pattern 中心（33 个，行优先排列）────────────────────────────
     mc = QR_MODULE_COUNT
     for i in QR_ALIGN_POS:
         for j in QR_ALIGN_POS:
@@ -85,7 +85,7 @@ def get_base_keypoints() -> np.ndarray:
                 continue
             kpts.append(_module_center_px(i, j))
 
-    assert len(kpts) == 49, f"Expected 49 kpts before corners, got {len(kpts)}"
+    assert len(kpts) == 36, f"Expected 36 kpts before corners, got {len(kpts)}"
 
     # ── 四个角点（4 个）：白色外边框四角（整张 base 图边界）──────────────────────
     outer_start = 0.0
@@ -96,11 +96,11 @@ def get_base_keypoints() -> np.ndarray:
     kpts.append((outer_start, outer_end))  # BL [52]
 
     assert len(kpts) == NUM_KPT, f"Expected {NUM_KPT} kpts, got {len(kpts)}"
-    return np.array(kpts, dtype=np.float32)  # (53, 2)
+    return np.array(kpts, dtype=np.float32)  # (40, 2)
 
 
 # 在模块加载时计算，所有样本共享，避免重复计算
-BASE_KPTS: np.ndarray = get_base_keypoints()  # (53, 2)，base 图坐标系
+BASE_KPTS: np.ndarray = get_base_keypoints()  # (40, 2)，base 图坐标系
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,20 +285,20 @@ def _build_screen_like_background(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _norm_kpts_to_grid(kpts53: np.ndarray, crop_size: int) -> np.ndarray:
+def _norm_kpts_to_grid(kpts_v30: np.ndarray, crop_size: int) -> np.ndarray:
     """
-    将 512×512 坐标系中 53 个关键点归一化到 [-1, 1]。
+    将 512×512 坐标系中 V30 关键点归一化到 [-1, 1]。
     使用 align_corners=True 约定：x_norm = x / (W/2 - 0.5) - 1
     等价于 x_norm = x * 2 / (crop_size - 1) - 1。
 
     Args:
-        kpts53   : (53, 2) 绝对像素坐标，range [0, crop_size-1]
+        kpts_v30 : (40, 2) 绝对像素坐标，range [0, crop_size-1]
         crop_size: 512
     Returns:
-        (53, 2) float32，range 约为 [-1, 1]
+        (40, 2) float32，range 约为 [-1, 1]
     """
     half = (crop_size - 1) / 2.0  # = 255.5 for 512
-    return (kpts53.astype(np.float32) / half) - 1.0
+    return (kpts_v30.astype(np.float32) / half) - 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────

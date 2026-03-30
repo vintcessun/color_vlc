@@ -351,19 +351,13 @@ fn codestream_ecc(meta: &MetaData, ds: RawData) -> DeQRResult<CorrectedDataStrea
             Ok(count) => total_corrected += count,
             Err(_) => {
                 failed_blocks += 1;
-                println!(
-                    "  ECC failure in block {}/{}: capacity {} errors",
-                    i + 1,
-                    bc,
-                    (ecc.bs - ecc.dw) / 2
-                );
             }
         }
 
         dst_offset += ecc.dw;
     }
 
-    if total_corrected > 0 || failed_blocks > 0 {
+    if total_corrected > 0 || (failed_blocks > 0 && failed_blocks < bc) {
         println!(
             "  ECC Summary: corrected {} bytes, {}/{} blocks failed",
             total_corrected, failed_blocks, bc
@@ -647,94 +641,6 @@ fn reserved_cell(version: Version, i: usize, j: usize) -> bool {
     }
 }
 
-/// 与 `reserved_cell` 相同，但不跳过版本信息区域。
-/// 用于我们自定义的编码器：encoder::setup_type_number 是空函数，
-/// 版本信息区域的格子被 map_data 填了真实数据位，不能按保留格跳过。
-fn reserved_cell_no_version_info(version: Version, i: usize, j: usize) -> bool {
-    let ver = &VERSION_DATA_BASE[version.0];
-    let size = version.0 * 4 + 17;
-
-    if i < 9 && j < 9 {
-        return true;
-    }
-
-    if i + 8 >= size && j < 9 {
-        return true;
-    }
-
-    if i < 9 && j + 8 >= size {
-        return true;
-    }
-
-    if i == 6 || j == 6 {
-        return true;
-    }
-
-    // 故意不检查 version >= 7 的版本信息块，因为编码器未写入版本信息
-
-    let mut ai = None;
-    let mut aj = None;
-
-    let mut len = 0;
-    for (a, &pattern) in ver.apat.iter().take_while(|&&x| x != 0).enumerate() {
-        len = a;
-        if pattern.abs_diff(i) < 3 {
-            ai = Some(a)
-        }
-        if pattern.abs_diff(j) < 3 {
-            aj = Some(a)
-        }
-    }
-
-    match (ai, aj) {
-        (Some(x), Some(y)) if x == len && y == len => true,
-        (Some(x), Some(_)) if 0 < x && x < len => true,
-        (Some(_), Some(x)) if 0 < x && x < len => true,
-        _ => false,
-    }
-}
-
-fn read_data_no_version_info(code: &dyn BitGrid, meta: &MetaData, remove_mask: bool) -> RawData {
-    let mut ds = RawData {
-        data: [0; MAX_PAYLOAD_SIZE],
-        len: 0,
-    };
-
-    let mut y = code.size() - 1;
-    let mut x = code.size() - 1;
-    let mut neg_dir = true;
-
-    while x > 0 {
-        if x == 6 {
-            x -= 1;
-        }
-        if !reserved_cell_no_version_info(meta.version, y, x) {
-            ds.push(read_bit(code, meta, y, x, remove_mask));
-        }
-        if !reserved_cell_no_version_info(meta.version, y, x - 1) {
-            ds.push(read_bit(code, meta, y, x - 1, remove_mask));
-        }
-
-        let (new_y, new_neg_dir) = match (y, neg_dir) {
-            (0, true) => {
-                x = x.saturating_sub(2);
-                (0, false)
-            }
-            (y, false) if y == code.size() - 1 => {
-                x = x.saturating_sub(2);
-                (code.size() - 1, true)
-            }
-            (y, true) => (y - 1, true),
-            (y, false) => (y + 1, false),
-        };
-
-        y = new_y;
-        neg_dir = new_neg_dir;
-    }
-
-    ds
-}
-
 fn read_format(code: &dyn BitGrid) -> DeQRResult<MetaData> {
     let version = Version::from_size(code.size())?;
 
@@ -934,6 +840,112 @@ pub fn decode_color_blocks_robust(
     Err(DeQRError::DataEcc)
 }
 
+// Version 40 固定功能模块定义：在 v40m 解码路径中，Finder / Alignment /
+// Timing / Dark module / Version info 一律按 QR 标准图样强制覆盖，
+// 不再信任上游颜色分类结果。
+const V40_SIZE: usize = 177;
+const V40_ALIGNMENT_CENTERS: [usize; 7] = [6, 30, 58, 86, 114, 142, 170];
+
+fn qr_version_info_bits(version: u32) -> u32 {
+    let mut d = version << 12;
+    let generator = 0x1f25u32;
+    for shift in (0..=5).rev() {
+        if ((d >> (shift + 12)) & 1) != 0 {
+            d ^= generator << shift;
+        }
+    }
+    (version << 12) | d
+}
+
+fn v40_finder_bit(x: usize, y: usize) -> Option<bool> {
+    let finder_bases = [
+        (0usize, 0usize),
+        (V40_SIZE - 7, 0usize),
+        (0usize, V40_SIZE - 7),
+    ];
+    for (bx, by) in finder_bases {
+        if x >= bx && x < bx + 7 && y >= by && y < by + 7 {
+            let lx = x - bx;
+            let ly = y - by;
+            let dark = lx == 0
+                || lx == 6
+                || ly == 0
+                || ly == 6
+                || ((2..=4).contains(&lx) && (2..=4).contains(&ly));
+            return Some(dark);
+        }
+
+        let sep_x = if bx == 0 { bx + 7 } else { bx - 1 };
+        let sep_y = if by == 0 { by + 7 } else { by - 1 };
+        if ((x >= bx && x < bx + 8) && y == sep_y) || ((y >= by && y < by + 8) && x == sep_x) {
+            return Some(false);
+        }
+    }
+    None
+}
+
+fn v40_alignment_bit(x: usize, y: usize) -> Option<bool> {
+    for &cy in &V40_ALIGNMENT_CENTERS {
+        for &cx in &V40_ALIGNMENT_CENTERS {
+            if cx == 6 && (cy == 6 || cy == V40_SIZE - 7) || (cx == V40_SIZE - 7 && cy == 6) {
+                continue;
+            }
+
+            let dx = x.abs_diff(cx);
+            let dy = y.abs_diff(cy);
+            if dx <= 2 && dy <= 2 {
+                let dark = dx == 2 || dy == 2 || (dx == 0 && dy == 0);
+                return Some(dark);
+            }
+        }
+    }
+    None
+}
+
+fn v40_timing_bit(x: usize, y: usize) -> Option<bool> {
+    if y == 6 && (8..=(V40_SIZE - 9)).contains(&x) {
+        return Some(x.is_multiple_of(2));
+    }
+    if x == 6 && (8..=(V40_SIZE - 9)).contains(&y) {
+        return Some(y.is_multiple_of(2));
+    }
+    None
+}
+
+fn v40_dark_module_bit(x: usize, y: usize) -> Option<bool> {
+    if x == 8 && y == (4 * 40 + 9) {
+        return Some(true);
+    }
+    None
+}
+
+fn v40_version_info_bit(x: usize, y: usize) -> Option<bool> {
+    let bits = qr_version_info_bits(40);
+    for i in 0..18usize {
+        let bit = ((bits >> i) & 1) != 0;
+        let a_x = V40_SIZE - 11 + (i % 3);
+        let a_y = i / 3;
+        if x == a_x && y == a_y {
+            return Some(bit);
+        }
+
+        let b_x = i / 3;
+        let b_y = V40_SIZE - 11 + (i % 3);
+        if x == b_x && y == b_y {
+            return Some(bit);
+        }
+    }
+    None
+}
+
+fn v40_fixed_function_bit(x: usize, y: usize) -> Option<bool> {
+    v40_finder_bit(x, y)
+        .or_else(|| v40_alignment_bit(x, y))
+        .or_else(|| v40_timing_bit(x, y))
+        .or_else(|| v40_dark_module_bit(x, y))
+        .or_else(|| v40_version_info_bit(x, y))
+}
+
 /// 使用固化的Version 40和M等级来解码颜色块
 /// 这个函数假设QR码始终是Version 40且使用M等级纠错
 pub fn decode_color_blocks_v40m(
@@ -951,27 +963,9 @@ pub fn decode_color_blocks_v40m(
         return Err(DeQRError::InvalidGridSize);
     }
 
-    let is_finder_pattern_dark = |x: usize, y: usize| -> bool {
-        let is_in_finder = |lx: usize, ly: usize| -> bool {
-            (lx == 0 || lx == 6 || ly == 0 || ly == 6)
-                || ((2..=4).contains(&lx) && (2..=4).contains(&ly))
-        };
-
-        if x < 7 && y < 7 {
-            return is_in_finder(x, y);
-        }
-        if x >= size - 7 && y < 7 {
-            return is_in_finder(x - (size - 7), y);
-        }
-        if x < 7 && y >= size - 7 {
-            return is_in_finder(x, y - (size - 7));
-        }
-        false
-    };
-
     let grid_a = SimpleGrid::from_func(size, |x, y| {
-        if is_finder_pattern_dark(x, y) {
-            return true;
+        if let Some(bit) = v40_fixed_function_bit(x, y) {
+            return bit;
         }
         matches!(
             blocks[y][x],
@@ -980,8 +974,8 @@ pub fn decode_color_blocks_v40m(
     });
 
     let grid_b = SimpleGrid::from_func(size, |x, y| {
-        if is_finder_pattern_dark(x, y) {
-            return true;
+        if let Some(bit) = v40_fixed_function_bit(x, y) {
+            return bit;
         }
         matches!(
             blocks[y][x],
@@ -1036,17 +1030,8 @@ where
         Err(DeQRError::DataEcc)
     }
 
-    // 先尝试原始方向，再尝试镜像方向（与decode()保持一致）
-    if let Ok(()) = try_decode_single(code, &mut writer) {
-        return Ok(());
-    }
-
-    let mirrored = super::MirroredGrid(code);
-    if let Ok(()) = try_decode_single(&mirrored, &mut writer) {
-        return Ok(());
-    }
-
-    Err(DeQRError::DataEcc)
+    // 不再穷举 8 个几何方向，避免实拍失败时重复触发大量 ECC 解码。
+    try_decode_single(code, &mut writer)
 }
 
 fn next_permutation4(a: &mut [u8; 4]) -> bool {

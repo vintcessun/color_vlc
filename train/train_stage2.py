@@ -40,20 +40,78 @@ except ImportError:
 
 # 同目录导入 Stage 2 模型
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from model_stage2 import ColorQRStage2, CANON_KPTS_NORM  # CANON_KPTS_NORM:(53,2)
+from model_stage2 import ColorQRStage2
 
-NUM_KPT = 53
+NUM_KPT = 40
 OUT_SIZE = 512
+
+# Version-30 标签布局（3 finder + 33 alignment + 4 corners）
+QR_MODULE_COUNT = 137
+QR_BOX_SIZE = 4
+QR_BORDER = 1
+QR_ALIGN_POS = [6, 26, 52, 78, 104, 130]
+_FINDER_OVERLAP = {(6, 6), (6, 130), (130, 6)}
+IDX_TL, IDX_TR, IDX_BR, IDX_BL = 36, 37, 38, 39
 
 # 关键点加权：3个 Finder 中心 + 4个角点权重更高，减少全局漂移
 FINDER_INDICES = [0, 1, 2]
-CORNER_INDICES = [49, 50, 51, 52]
+CORNER_INDICES = [36, 37, 38, 39]
 FINDER_WEIGHT = 4.5
 CORNER_WEIGHT = 7.0
 
 # Wing Loss 参数（关键点高精度定位）
 WING_W = 10.0
 WING_EPSILON = 2.0
+
+
+def _module_center_px(row: int, col: int):
+    x = (col + QR_BORDER) * QR_BOX_SIZE + QR_BOX_SIZE // 2
+    y = (row + QR_BORDER) * QR_BOX_SIZE + QR_BOX_SIZE // 2
+    return float(x), float(y)
+
+
+def _get_base_kpts_v30() -> np.ndarray:
+    kpts = []
+    kpts.append(_module_center_px(3, 3))
+    kpts.append(_module_center_px(3, QR_MODULE_COUNT - 4))
+    kpts.append(_module_center_px(QR_MODULE_COUNT - 4, 3))
+    mc = QR_MODULE_COUNT
+    for i in QR_ALIGN_POS:
+        for j in QR_ALIGN_POS:
+            if (i, j) in _FINDER_OVERLAP:
+                continue
+            if i <= 8 and j <= 8:
+                continue
+            if i <= 8 and j >= mc - 8:
+                continue
+            if i >= mc - 8 and j <= 8:
+                continue
+            kpts.append(_module_center_px(i, j))
+
+    outer_start = 0.0
+    outer_end = float((QR_MODULE_COUNT + 2 * QR_BORDER) * QR_BOX_SIZE - 1)
+    kpts.append((outer_start, outer_start))
+    kpts.append((outer_end, outer_start))
+    kpts.append((outer_end, outer_end))
+    kpts.append((outer_start, outer_end))
+    assert len(kpts) == NUM_KPT
+    return np.array(kpts, dtype=np.float32)
+
+
+def _compute_canon_kpts_norm_v30(out_size: int = OUT_SIZE) -> np.ndarray:
+    base_kpts = _get_base_kpts_v30()
+    corners_src = base_kpts[[IDX_TL, IDX_TR, IDX_BR, IDX_BL]]
+    s = float(out_size - 1)
+    corners_dst = np.array([[0, 0], [s, 0], [s, s], [0, s]], dtype=np.float32)
+    h_canon = cv2.getPerspectiveTransform(corners_src, corners_dst)
+
+    pts = base_kpts.reshape(-1, 1, 2)
+    canon = cv2.perspectiveTransform(pts, h_canon).reshape(NUM_KPT, 2)
+    half = (out_size - 1) / 2.0
+    return (canon / half - 1.0).astype(np.float32)
+
+
+CANON_KPTS_NORM = _compute_canon_kpts_norm_v30()
 
 
 def _safe_torch_save(obj, path: str, retries: int = 3, retry_delay: float = 0.6):
@@ -111,7 +169,12 @@ class Stage2Dataset(Dataset):
 
         img = Image.open(img_path).convert("RGB")
         img_t = TF.to_tensor(img)  # (3,512,512) float [0,1]
-        kpts = np.load(lbl_path).astype(np.float32)  # (53,2) float [-1,1]
+        kpts = np.load(lbl_path).astype(np.float32)
+        if kpts.shape != (NUM_KPT, 2):
+            raise RuntimeError(
+                f"Label shape mismatch for {lbl_path}: expected ({NUM_KPT},2), got {kpts.shape}. "
+                "Please regenerate stage2_dataset with Version-30 format."
+            )
         return img_t, torch.from_numpy(kpts)
 
 
@@ -424,10 +487,16 @@ def train_stage2(
 
         for batch_idx, (imgs, gt_kpts) in enumerate(loader):
             imgs = imgs.to(device)  # (B, 3, 512, 512)
-            gt_kpts = gt_kpts.to(device)  # (B, 53, 2)
+            gt_kpts = gt_kpts.to(device)  # (B, NUM_KPT, 2)
 
             # ── Forward ──────────────────────────────────────────────────────
             pred_kpts, rectified = model(imgs)
+            if pred_kpts.shape[1] < NUM_KPT:
+                raise RuntimeError(
+                    f"Model output keypoints ({pred_kpts.shape[1]}) < required NUM_KPT ({NUM_KPT})"
+                )
+            if pred_kpts.shape[1] != NUM_KPT:
+                pred_kpts = pred_kpts[:, :NUM_KPT, :]
 
             # ── Loss = 严格加权 Wing Loss ────────────────────────────────────
             loss, small_contrib, large_contrib = _weighted_kpt_wing(
@@ -452,6 +521,8 @@ def train_stage2(
                 model.eval()
                 with torch.no_grad():
                     p_kpts_vis, rect_vis = model(imgs[:1])
+                    if p_kpts_vis.shape[1] != NUM_KPT:
+                        p_kpts_vis = p_kpts_vis[:, :NUM_KPT, :]
                 vis_path = os.path.join(vis_dir, f"step_{global_step:07d}.jpg")
                 save_comparison(
                     imgs[0],
