@@ -1,7 +1,3 @@
-import os
-
-os.environ["MPLBACKEND"] = "Agg"
-
 import cv2
 import numpy as np
 from qreader import QReader
