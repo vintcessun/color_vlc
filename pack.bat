@@ -1,6 +1,9 @@
 set MPLBACKEND=Agg
 
-nuitka --standalone --onefile --jobs=6 ^
+D:\Scripts\color-vlc\.venv\Scripts\python.exe -m nuitka --standalone --onefile --jobs=8 ^
+ --include-package-data=certifi ^
+ --include-package-data=ultralytics ^
+ --include-package-data=qrdet ^
  --plugin-enable=torch ^
  --plugin-enable=numpy ^
  --plugin-enable=matplotlib ^

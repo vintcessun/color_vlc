@@ -1,3 +1,13 @@
+import os
+import sys
+
+os.environ["SSL_CERT_FILE"] = os.path.join(
+    sys._MEIPASS if hasattr(sys, "_MEIPASS") else os.path.dirname(__file__),
+    "certifi",
+    "cacert.pem",
+)
+
+
 import cv2
 import numpy as np
 from qreader import QReader
@@ -365,3 +375,8 @@ if __name__ == "__main__":
     else:
         decoder = ColorDecoder()
         decoder.decode(sys.argv[1], sys.argv[2], sys.argv[3])
+
+        # --- 在这里添加 ---
+        print("\n[Success] All processes finished. Exiting...")
+        # 强制退出进程，不触发 Python 的正常对象销毁流程（避免垃圾回收报错）
+        os._exit(0)
